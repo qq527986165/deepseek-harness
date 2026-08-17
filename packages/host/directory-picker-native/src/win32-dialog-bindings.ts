@@ -1,10 +1,11 @@
 /**
  * koffi-backed Win32 bindings for the folder dialog: the COM vtable calls
- * behind {@link Win32DialogBindings} plus the cross-thread window closer the
- * driver uses to service aborts. The module loads on every platform; koffi
- * itself is imported lazily inside each function, so non-Windows processes
- * never load it — the same containment as the repo's other `win32.ts`
- * modules.
+ * behind {@link Win32DialogBindings}, the foreground-owner/input-attach
+ * surface the sequencing uses to raise the dialog, plus the cross-thread
+ * window closer the driver uses to service aborts. The module loads on
+ * every platform; koffi itself is imported lazily inside each function, so
+ * non-Windows processes never load it — the same containment as the repo's
+ * other `win32.ts` modules.
  *
  * The COM surface used here (IModalWindow/IFileDialog/IFileOpenDialog and
  * IShellItem vtable order, the GUIDs, `FOS_*` and `SIGDN_FILESYSPATH`) is
@@ -99,6 +100,10 @@ export async function loadWin32DialogBindings(): Promise<Win32DialogBindings> {
   const coCreateInstance = ole32.func('__stdcall', 'CoCreateInstance', 'int32', ['void *', 'void *', 'uint32', 'void *', 'void *'])
   const coTaskMemFree = ole32.func('__stdcall', 'CoTaskMemFree', 'void', ['void *'])
   const getCurrentThreadId = kernel32.func('__stdcall', 'GetCurrentThreadId', 'uint32', [])
+  const getForegroundWindow = user32.func('__stdcall', 'GetForegroundWindow', 'void *', [])
+  // The process id out-param is deliberately null: only the thread id matters.
+  const getWindowThreadProcessId = user32.func('__stdcall', 'GetWindowThreadProcessId', 'uint32', ['void *', 'void *'])
+  const attachThreadInput = user32.func('__stdcall', 'AttachThreadInput', 'int', ['uint32', 'uint32', 'int'])
 
   const protoShow = koffi.proto('int32 __stdcall DshDialogShow(void *self, void *owner)')
   const protoSetOptions = koffi.proto('int32 __stdcall DshDialogSetOptions(void *self, uint32 options)')
@@ -138,6 +143,17 @@ export async function loadWin32DialogBindings(): Promise<Win32DialogBindings> {
       coUninitialize()
     },
     currentThreadId: () => getCurrentThreadId() as number,
+    foregroundWindow: () => getForegroundWindow(),
+    attachForegroundInput: (owner) => {
+      const ownerThread = getWindowThreadProcessId(owner, null) as number
+      if (ownerThread === 0) return false
+      return attachThreadInput(getCurrentThreadId(), ownerThread, 1) !== 0
+    },
+    detachForegroundInput: (owner) => {
+      const ownerThread = getWindowThreadProcessId(owner, null) as number
+      if (ownerThread === 0) return
+      attachThreadInput(getCurrentThreadId(), ownerThread, 0)
+    },
     createFolderDialog: (): Win32FolderDialog => {
       const out = Buffer.alloc(pointerSize)
       const created = coCreateInstance(CLSID_FILE_OPEN_DIALOG, null, CLSCTX_INPROC_SERVER, IID_IFILE_OPEN_DIALOG, out) as number
@@ -146,7 +162,7 @@ export async function loadWin32DialogBindings(): Promise<Win32DialogBindings> {
       return {
         setOptions: options => method(dialog, SLOT_SET_OPTIONS, protoSetOptions)(options),
         setTitle: title => method(dialog, SLOT_SET_TITLE, protoSetTitle)(title),
-        show: () => method(dialog, SLOT_SHOW, protoShow)(null),
+        show: owner => method(dialog, SLOT_SHOW, protoShow)(owner),
         resultPath: () => {
           const itemOut: unknown[] = [null]
           const gotItem = method(dialog, SLOT_GET_RESULT, protoGetResult)(itemOut)

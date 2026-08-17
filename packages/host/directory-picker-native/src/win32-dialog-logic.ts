@@ -31,11 +31,14 @@ export interface Win32FolderDialog {
    */
   setTitle(title: string): number
   /**
-   * `IModalWindow::Show` with no owner window; blocks the calling thread
-   * until the user selects or dismisses.
+   * `IModalWindow::Show` with the operator's foreground window as owner;
+   * blocks the calling thread until the user selects or dismisses. The owner
+   * keeps the dialog above the browser window, disables it for the modal
+   * lifetime, and removes the dialog's separate taskbar entry.
+   * @param owner - the owner window handle, or null to show without one.
    * @returns the call's HRESULT (`HRESULT_CANCELLED` on dismissal).
    */
-  show(): number
+  show(owner: unknown): number
   /**
    * `IFileDialog::GetResult` + `IShellItem::GetDisplayName(SIGDN_FILESYSPATH)`,
    * releasing the shell item and freeing the COM string.
@@ -79,6 +82,30 @@ export interface Win32DialogBindings {
    * @returns the calling thread's native id.
    */
   currentThreadId(): number
+  /**
+   * `GetForegroundWindow` — the window the operator was interacting with
+   * (the Web GUI browser window) when the pick started. Used as the
+   * dialog's owner and as the thread whose input queue the picker joins
+   * for foreground activation.
+   * @returns the foreground window handle, or null when there is none.
+   */
+  foregroundWindow(): unknown
+  /**
+   * `AttachThreadInput` — join the calling thread's input queue with the
+   * owner window's thread so the modal `Show` may activate the dialog
+   * despite Windows' foreground lock (the worker is a background process).
+   * Best-effort: `false` still shows the owned dialog, only without the
+   * activation guarantee.
+   * @param owner - the foreground window handle from {@link foregroundWindow}.
+   * @returns whether the queues are attached (the caller must then detach).
+   */
+  attachForegroundInput(owner: unknown): boolean
+  /**
+   * Undo {@link attachForegroundInput} for the same owner; call exactly
+   * once per successful attach, after `Show` returns.
+   * @param owner - the window handle attach used.
+   */
+  detachForegroundInput(owner: unknown): void
 }
 
 /**
@@ -94,8 +121,11 @@ function check(hr: number, what: string): number {
 
 /**
  * Run one modal folder-picker conversation on the calling thread: DPI opt-in,
- * STA init, dialog creation, `Show`, and result extraction, releasing the
- * dialog on every path.
+ * STA init, dialog creation, owner capture, `Show`, and result extraction,
+ * releasing the dialog on every path. The dialog is owned by the operator's
+ * current foreground window and this thread's input queue is attached to the
+ * owner's for the modal lifetime, so Windows raises and activates the dialog
+ * instead of leaving a background child's window behind the browser.
  * @param bindings - the native surface (koffi-backed in production, fakes in tests).
  * @param title - the dialog title text.
  * @param onShowing - called with the native thread id immediately before the
@@ -113,17 +143,24 @@ export function runFolderDialog(
   // uninitialized exactly once on every path.
   try {
     const dialog = bindings.createFolderDialog()
+    const owner = bindings.foregroundWindow()
+    // Attach only right before Show; the pairing detach below is skipped
+    // when the attach refused (no foreground window, or a thread Windows
+    // would not join — e.g. a cross-integrity owner).
+    let inputAttached = false
     try {
       check(dialog.setOptions(FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR), 'SetOptions')
       check(dialog.setTitle(title), 'SetTitle')
       onShowing(bindings.currentThreadId())
-      const shown = dialog.show()
+      inputAttached = owner !== null && bindings.attachForegroundInput(owner)
+      const shown = dialog.show(owner)
       if (shown === HRESULT_CANCELLED) return null
       check(shown, 'Show')
       const result = dialog.resultPath()
       check(result.hr, 'GetResult')
       return result.path as string
     } finally {
+      if (inputAttached) bindings.detachForegroundInput(owner)
       dialog.release()
     }
   } finally {

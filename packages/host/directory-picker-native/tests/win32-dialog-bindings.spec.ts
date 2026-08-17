@@ -40,6 +40,16 @@ interface ComWorld {
   registered: number
   unregistered: number
   uninitialized: number
+  /** What `GetForegroundWindow` returns (null simulates no foreground window). */
+  foreground: unknown
+  /** What `GetWindowThreadProcessId` returns for the owner window. */
+  fgThreadId: number
+  /** What `AttachThreadInput` returns for every call. */
+  attachResult: number
+  /** Every `AttachThreadInput` call: (attaching thread, target thread, attach flag). */
+  attached: { tid: number; target: number; attach: number }[]
+  /** Every owner HWND `Show` received. */
+  showOwners: unknown[]
 }
 
 function comWorld(overrides: Partial<ComWorld> = {}): ComWorld {
@@ -49,6 +59,8 @@ function comWorld(overrides: Partial<ComWorld> = {}): ComWorld {
     path: 'C:\\选中\\directory',
     titles: [], options: [], dpiContexts: [], freed: [], released: [], posted: [],
     registered: 0, unregistered: 0, uninitialized: 0,
+    foreground: { kind: 'foreground' }, fgThreadId: 4242, attachResult: 1,
+    attached: [], showOwners: [],
     ...overrides,
   }
 }
@@ -67,7 +79,7 @@ function installFakeKoffi(world: ComWorld): void {
       switch (slot) {
         case 9: world.options.push(args[0] as number); return 0
         case 17: world.titles.push(args[0] as string); return 0
-        case 3: return world.showHr
+        case 3: world.showOwners.push(args[0]); return world.showHr
         case 20: {
           if (world.getResultHr < 0) return world.getResultHr
           ;(args[0] as unknown[])[0] = itemPtr
@@ -106,6 +118,12 @@ function installFakeKoffi(world: ComWorld): void {
             }
             case 'CoTaskMemFree': return (ptr: unknown) => { world.freed.push(ptr) }
             case 'GetCurrentThreadId': return () => 31337
+            case 'GetForegroundWindow': return () => world.foreground
+            case 'GetWindowThreadProcessId': return (_hwnd: unknown) => world.fgThreadId
+            case 'AttachThreadInput': return (tid: unknown, target: unknown, attach: unknown) => {
+              world.attached.push({ tid: tid as number, target: target as number, attach: attach as number })
+              return world.attachResult
+            }
             case 'SetThreadDpiAwarenessContext': {
               if (!world.hasThreadDpi) throw new Error(`${dll}: SetThreadDpiAwarenessContext not found`)
               return (context: unknown) => {
@@ -175,9 +193,42 @@ describe('loadWin32DialogBindings over the fake COM world', () => {
     expect(world.titles).toEqual(['选择工作区目录'])
     expect(world.options).toHaveLength(1)
     expect(showing).toHaveBeenCalledWith(31337)
+    expect(world.showOwners).toEqual([world.foreground])
+    expect(world.attached).toEqual([
+      { tid: 31337, target: 4242, attach: 1 },
+      { tid: 31337, target: 4242, attach: 0 },
+    ])
     expect(world.freed).toHaveLength(1)
     expect(world.released).toEqual(['item', 'dialog'])
     expect(world.uninitialized).toBe(1)
+  })
+
+  it('shows without an owner and never attaches when there is no foreground window', async () => {
+    const world = comWorld({ foreground: null })
+    installFakeKoffi(world)
+    const bindings = await (await loadBindingsModule()).loadWin32DialogBindings()
+    expect(runFolderDialog(bindings, 'Pick', vi.fn())).toBe('C:\\选中\\directory')
+    expect(world.showOwners).toEqual([null])
+    expect(world.attached).toEqual([])
+  })
+
+  it('keeps the pick when the input attach refuses, without a pairing detach', async () => {
+    const world = comWorld({ attachResult: 0 })
+    installFakeKoffi(world)
+    const bindings = await (await loadBindingsModule()).loadWin32DialogBindings()
+    expect(runFolderDialog(bindings, 'Pick', vi.fn())).toBe('C:\\选中\\directory')
+    expect(world.showOwners).toEqual([world.foreground])
+    expect(world.attached).toEqual([{ tid: 31337, target: 4242, attach: 1 }])
+  })
+
+  it('refuses the attach pair when the owner window reports no thread', async () => {
+    const world = comWorld({ fgThreadId: 0 })
+    installFakeKoffi(world)
+    const { loadWin32DialogBindings } = await loadBindingsModule()
+    const bindings = await loadWin32DialogBindings()
+    expect(runFolderDialog(bindings, 'Pick', vi.fn())).toBe('C:\\选中\\directory')
+    bindings.detachForegroundInput({ kind: 'dead' })
+    expect(world.attached).toEqual([])
   })
 
   it('maps dismissal and the S_FALSE CoInitializeEx', async () => {
@@ -299,6 +350,9 @@ describe('the worker entry over a mocked process boundary', () => {
         coInitializeSta: () => 0,
         coUninitialize: () => undefined,
         currentThreadId: () => 11,
+        foregroundWindow: () => null,
+        attachForegroundInput: () => false,
+        detachForegroundInput: () => undefined,
         createFolderDialog: () => ({
           setOptions: () => 0,
           setTitle: () => 0,

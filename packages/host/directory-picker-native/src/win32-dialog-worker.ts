@@ -2,11 +2,13 @@
  * Child-process entry for the Win32 folder dialog: blocks THIS process
  * inside the modal `Show` so the host event loop stays live, reporting over
  * the IPC channel. Spawned as a child process (not a worker thread) so the
- * dialog is the process's first window and Windows activates it without a
- * manual foreground call. Protocol: `{kind:'showing',threadId}` right
- * before the blocking call (the driver's abort lever needs the native
- * thread id), then exactly one of `{kind:'done',path}` or
- * `{kind:'error',message}`.
+ * dialog owns its thread. The dialog is shown owned by the operator's
+ * current foreground window with this thread's input attached to the owner
+ * for the modal lifetime — a background child alone cannot raise or
+ * activate its window under Windows' foreground lock. Protocol:
+ * `{kind:'showing',threadId}` right before the blocking call (the driver's
+ * abort lever needs the native thread id), then exactly one of
+ * `{kind:'done',path}` or `{kind:'error',message}`.
  */
 
 import { loadWin32DialogBindings } from './win32-dialog-bindings.ts'
