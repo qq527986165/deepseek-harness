@@ -103,6 +103,7 @@ export function extractWikiLinks(body: string): string[] {
   const pattern = /\[\[([^\]|]+)(?:\|[^\]]*)?\]\]/g
   let match: RegExpExecArray | null
   while ((match = pattern.exec(body)) !== null) {
+    /* v8 ignore next -- the capture group always participates in a match. */
     const title = match[1]?.trim() ?? ''
     if (title !== '') links.add(title)
   }
