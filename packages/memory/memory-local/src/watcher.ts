@@ -11,7 +11,7 @@ import { MEMORY_INDEX_FILE } from './schema.ts'
 
 /** The chokidar surface the watcher needs; tests supply a fake. */
 export interface WatchLike {
-  on(event: string, listener: (...args: never[]) => void): unknown
+  on(event: string, listener: (...args: unknown[]) => void): unknown
   close(): Promise<void>
 }
 

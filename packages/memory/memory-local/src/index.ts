@@ -97,7 +97,11 @@ export function resolveConfig(config?: Config): ResolvedConfig {
   }
 }
 
-/** Extract exact `[[wikilink]]` targets from markdown body text, deduplicated. */
+/**
+ * Extract exact `[[wikilink]]` targets from markdown body text, deduplicated.
+ * @param body - markdown text to scan.
+ * @returns unique link titles in occurrence order.
+ */
 export function extractWikiLinks(body: string): string[] {
   const links = new Set<string>()
   const pattern = /\[\[([^\]|]+)(?:\|[^\]]*)?\]\]/g
@@ -494,7 +498,11 @@ export class LocalMemoryProvider implements MemoryProvider {
   }
 }
 
-/** Mount the provider into the memory service; unloading closes vaults, data survives. */
+/**
+ * Mount the provider into the memory service; unloading closes vaults, data survives.
+ * @param ctx - Cordis context carrying the memory service.
+ * @param config - optional watch and bound configuration.
+ */
 export function apply(ctx: Context, config: Config = {}): void {
   const resolved = resolveConfig(config)
   /* v8 ignore next -- the plugin-level warn body fires only on real watcher faults. */

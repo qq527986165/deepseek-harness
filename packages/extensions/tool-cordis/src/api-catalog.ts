@@ -888,6 +888,49 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     ],
   },
   {
+    key: 'memory',
+    summary: 'Sole-provider memory service (`ctx.memory`).',
+    description: 'Sole-provider memory service (`ctx.memory`). Without a registered provider every operation fails loudly; scope resolution degrades deliberately to global-only when no workspace registry is composed.',
+    methods: [
+      {
+        signature: 'register(provider: MemoryProvider): () => Promise<void>',
+        description: 'Register the sole storage provider. Disposal closes the registration and waits for every tracked in-flight operation before a later provider may register.',
+        parameters: [{ name: 'provider', description: 'provider implementing the write/read/search/traverse contract.' }],
+        returns: 'exact Cordis effect disposer, which settles after in-flight calls quiesce.',
+      },
+      {
+        signature: 'async resolveScopes(cwd: string | undefined): Promise<MemoryScope[]>',
+        description: 'Resolve the scope chain for one session cwd: `[\'project\', \'global\']` when the cwd matches a registered workspace, `[\'global\']` otherwise. A missing workspace registry, an unregistered path, or a registry lookup failure all fall back to global-only — scope resolution must never block memory access.',
+        parameters: [{ name: 'cwd', description: 'session working directory, or `undefined` for global-only sessions.' }],
+        returns: 'the ordered scope chain, project first.',
+      },
+      {
+        signature: 'async write(input: MemoryWriteInput, cwd: string | undefined, signal?: AbortSignal): Promise<MemoryWriteResult>',
+        description: 'Create or replace one note. `scope: \'project\'` requires the caller\'s cwd to resolve to a registered workspace.',
+        parameters: [{ name: 'input', description: 'note content; `id` present means replace that note.' }, { name: 'cwd', description: 'caller session working directory.' }, { name: 'signal', description: 'caller cancellation.' }],
+        returns: 'the committed note reference.',
+      },
+      {
+        signature: 'async read(ref: string, cwd: string | undefined, signal?: AbortSignal): Promise<MemoryNote>',
+        description: 'Read one note by id or exact title across the caller\'s scope chain.',
+        parameters: [{ name: 'ref', description: 'note id or exact title.' }, { name: 'cwd', description: 'caller session working directory.' }, { name: 'signal', description: 'caller cancellation.' }],
+        returns: 'the resolved note with both link directions.',
+      },
+      {
+        signature: 'async search( query: string, opts: MemorySearchOptions | undefined, cwd: string | undefined, signal?: AbortSignal, ): Promise<MemorySearchHit[]>',
+        description: 'Ranked full-text search across the caller\'s scope chain, project hits first.',
+        parameters: [{ name: 'query', description: 'FTS query terms.' }, { name: 'opts', description: 'optional limit, bounded above by provider config.' }, { name: 'cwd', description: 'caller session working directory.' }, { name: 'signal', description: 'caller cancellation.' }],
+        returns: 'ranked hits with snippets and tags.',
+      },
+      {
+        signature: 'async traverse( ref: string, opts: MemoryTraverseOptions | undefined, cwd: string | undefined, signal?: AbortSignal, ): Promise<MemoryTraversal>',
+        description: 'Bounded link adjacency around one note, resolved across the caller\'s scope chain and traversed within the note\'s own vault.',
+        parameters: [{ name: 'ref', description: 'start note id or exact title.' }, { name: 'opts', description: 'optional depth (1-2) and link-kind filter.' }, { name: 'cwd', description: 'caller session working directory.' }, { name: 'signal', description: 'caller cancellation.' }],
+        returns: 'the start note and its adjacency nodes.',
+      },
+    ],
+  },
+  {
     key: 'messageFeedback',
     summary: 'Storage-domain sidecar service.',
     description: 'Storage-domain sidecar service. It inspects persisted Session history and never creates or resumes an Agent or Session.',
@@ -3366,6 +3409,58 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'ManualCompactAgentContext',
     declaration: 'export interface ManualCompactAgentContext extends CompactionAgentContext {\n    runMaintenance<T>(task: (signal: AbortSignal) => Promise<T>): Promise<T>;\n}',
+  },
+  {
+    name: 'MemoryLinkKind',
+    declaration: 'export type MemoryLinkKind = \'wikilink\' | \'related\';',
+  },
+  {
+    name: 'MemoryLinkTarget',
+    declaration: 'export interface MemoryLinkTarget {\n    readonly title: string;\n    readonly id?: MemoryNoteId;\n}',
+  },
+  {
+    name: 'MemoryNote',
+    declaration: 'export interface MemoryNote {\n    readonly id: MemoryNoteId;\n    readonly scope: MemoryScope;\n    readonly title: string;\n    readonly path: string;\n    readonly tags: readonly string[];\n    readonly body: string;\n    readonly related: readonly MemoryLinkTarget[];\n    readonly backlinks: readonly MemoryLinkTarget[];\n}',
+  },
+  {
+    name: 'MemoryNoteId',
+    declaration: 'export type MemoryNoteId = Branded<\'memory-note\'>;',
+  },
+  {
+    name: 'MemoryProvider',
+    declaration: 'export interface MemoryProvider {\n    write(input: MemoryWriteInput, dir: string, signal?: AbortSignal): Promise<MemoryWriteResult>;\n    read(ref: string, dirs: readonly string[], signal?: AbortSignal): Promise<MemoryNote>;\n    search(query: string, opts: MemorySearchOptions | undefined, dirs: readonly string[], signal?: AbortSignal): Promise<MemorySearchHit[]>;\n    traverse(ref: string, opts: MemoryTraverseOptions | undefined, dirs: readonly string[], signal?: AbortSignal): Promise<MemoryTraversal>;\n}',
+  },
+  {
+    name: 'MemoryScope',
+    declaration: 'export type MemoryScope = \'project\' | \'global\';',
+  },
+  {
+    name: 'MemorySearchHit',
+    declaration: 'export interface MemorySearchHit {\n    readonly id: MemoryNoteId;\n    readonly scope: MemoryScope;\n    readonly title: string;\n    readonly snippet: string;\n    readonly tags: readonly string[];\n}',
+  },
+  {
+    name: 'MemorySearchOptions',
+    declaration: 'export interface MemorySearchOptions {\n    readonly limit?: number;\n}',
+  },
+  {
+    name: 'MemoryTraversal',
+    declaration: 'export interface MemoryTraversal {\n    readonly start: {\n        readonly id: MemoryNoteId;\n        readonly title: string;\n    };\n    readonly nodes: readonly MemoryTraversalNode[];\n    readonly truncated: boolean;\n}',
+  },
+  {
+    name: 'MemoryTraversalNode',
+    declaration: 'export interface MemoryTraversalNode {\n    readonly id?: MemoryNoteId;\n    readonly title: string;\n    readonly via: {\n        readonly kind: MemoryLinkKind;\n        readonly direction: \'out\' | \'in\';\n    };\n}',
+  },
+  {
+    name: 'MemoryTraverseOptions',
+    declaration: 'export interface MemoryTraverseOptions {\n    readonly depth?: 1 | 2;\n    readonly kinds?: readonly MemoryLinkKind[];\n}',
+  },
+  {
+    name: 'MemoryWriteInput',
+    declaration: 'export interface MemoryWriteInput {\n    readonly id?: MemoryNoteId;\n    readonly scope: MemoryScope;\n    readonly title: string;\n    readonly content: string;\n    readonly tags?: readonly string[];\n    readonly related?: readonly string[];\n}',
+  },
+  {
+    name: 'MemoryWriteResult',
+    declaration: 'export interface MemoryWriteResult {\n    readonly id: MemoryNoteId;\n    readonly scope: MemoryScope;\n    readonly title: string;\n    readonly path: string;\n    readonly created: string;\n    readonly updated: string;\n}',
   },
   {
     name: 'Message',

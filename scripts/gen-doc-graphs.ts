@@ -115,6 +115,15 @@ const SERVICE_ROLES: ServiceRole[] = [
     note: 'Adapters register provider implementations; the loop and compaction call the provider-neutral stream service.',
   },
   {
+    key: 'memory',
+    pkg: 'memory',
+    title: 'Memory capability seam',
+    mode: 'seam',
+    implementations: ['memory-local'],
+    consumers: ['tool-memory'],
+    note: 'The sole-provider seam resolves session vault scopes; the file-first provider owns the Obsidian-compatible vaults and their derived SQLite index.',
+  },
+  {
     key: 'tokenMeter',
     pkg: 'token-meter',
     title: 'Replay token measurement',

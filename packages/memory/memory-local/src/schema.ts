@@ -16,7 +16,11 @@ export const MEMORY_INDEX_FILE = '.memory-index.sqlite'
 /** Physical layout version, stamped via `PRAGMA user_version`; mismatches rebuild. */
 export const MEMORY_SCHEMA_VERSION = 1
 
-/** The index path for one vault directory. */
+/**
+ * The index path for one vault directory.
+ * @param dir - vault directory.
+ * @returns the absolute index file path.
+ */
 export function indexPath(dir: string): string {
   return join(dir, MEMORY_INDEX_FILE)
 }
@@ -49,7 +53,10 @@ export interface IndexRow {
   readonly tags: readonly string[]
 }
 
-/** Create every table of the current schema on an open database. */
+/**
+ * Create every table of the current schema on an open database.
+ * @param db - open index database.
+ */
 export function createSchema(db: DatabaseSync): void {
   db.exec(DDL)
   db.exec(`PRAGMA user_version = ${MEMORY_SCHEMA_VERSION}`)
@@ -139,21 +146,34 @@ export function upsertIndexedNote(
   for (const title of related) insertLink.run(row.id, title, 'related')
 }
 
-/** Remove one indexed note with its FTS and link rows. */
+/**
+ * Remove one indexed note with its FTS and link rows.
+ * @param db - open index database.
+ * @param id - note id to drop.
+ */
 export function removeIndexedNote(db: DatabaseSync, id: string): void {
   db.prepare('DELETE FROM notes_fts WHERE rowid = (SELECT rowid FROM notes WHERE id = ?)').run(id)
   db.prepare('DELETE FROM links WHERE from_id = ?').run(id)
   db.prepare('DELETE FROM notes WHERE id = ?').run(id)
 }
 
-/** Look up one indexed note by id first, then by exact title. */
+/**
+ * Look up one indexed note by id first, then by exact title.
+ * @param db - open index database.
+ * @param ref - note id or exact title.
+ * @returns the matching row, or `undefined` when neither matches.
+ */
 export function findIndexedNote(db: DatabaseSync, ref: string): IndexRow | undefined {
   const row = findRow(db, 'id', ref) ?? findRow(db, 'title', ref)
   if (row === undefined) return undefined
   return { id: row.id, path: row.path, title: row.title, created: row.created, updated: row.updated, tags: parseTags(row.tags) }
 }
 
-/** Every indexed relative path, for collision checks and reconcile scans. */
+/**
+ * Every indexed relative path, for collision checks and reconcile scans.
+ * @param db - open index database.
+ * @returns relative note paths in insertion order.
+ */
 export function listIndexedPaths(db: DatabaseSync): string[] {
   return db.prepare('SELECT path FROM notes').all().map(row => (row as { path: string }).path)
 }
@@ -197,7 +217,12 @@ export function searchIndex(db: DatabaseSync, query: string, limit: number): Sea
   })
 }
 
-/** Window one body around the first query term; `undefined` when no term occurs. */
+/**
+ * Window one body around the first query term; `undefined` when no term occurs.
+ * @param body - note body text to cut.
+ * @param query - search terms; the earliest occurrence wins.
+ * @returns an ellipsis-bounded window, or `undefined` without a match.
+ */
 export function makeSnippet(body: string, query: string): string | undefined {
   const terms = query.split(/\s+/).filter(term => term !== '')
   let index = -1
@@ -215,22 +240,42 @@ export function makeSnippet(body: string, query: string): string | undefined {
   return `${start > 0 ? '…' : ''}${body.slice(start, end)}${end < body.length ? '…' : ''}`
 }
 
-/** Outgoing links of one note: kind plus target title, in insertion order. */
+/**
+ * Outgoing links of one note: kind plus target title, in insertion order.
+ * @param db - open index database.
+ * @param fromId - source note id.
+ * @returns typed outgoing link rows.
+ */
 export function outLinks(db: DatabaseSync, fromId: string): Array<{ kind: string; toTitle: string }> {
   return db.prepare('SELECT to_title AS toTitle, kind FROM links WHERE from_id = ? ORDER BY rowid').all(fromId) as Array<{ kind: string; toTitle: string }>
 }
 
-/** Incoming links onto one title: kind plus source id, in insertion order. */
+/**
+ * Incoming links onto one title: kind plus source id, in insertion order.
+ * @param db - open index database.
+ * @param title - exact target title.
+ * @returns typed incoming link rows.
+ */
 export function inLinks(db: DatabaseSync, title: string): Array<{ kind: string; fromId: string }> {
   return db.prepare('SELECT from_id AS fromId, kind FROM links WHERE to_title = ? ORDER BY rowid').all(title) as Array<{ kind: string; fromId: string }>
 }
 
-/** Resolve one exact title to its note id, or `undefined` when it dangles. */
+/**
+ * Resolve one exact title to its note id, or `undefined` when it dangles.
+ * @param db - open index database.
+ * @param title - exact target title.
+ * @returns the owning note id when the title resolves.
+ */
 export function findNoteIdByTitle(db: DatabaseSync, title: string): string | undefined {
   return (db.prepare('SELECT id FROM notes WHERE title = ?').get(title) as { id: string } | undefined)?.id
 }
 
-/** Look up one indexed note by exact id. */
+/**
+ * Look up one indexed note by exact id.
+ * @param db - open index database.
+ * @param id - exact note id.
+ * @returns the matching row, or `undefined` when unknown.
+ */
 export function findIndexedNoteById(db: DatabaseSync, id: string): IndexRow | undefined {
   const row = findRow(db, 'id', id)
   if (row === undefined) return undefined

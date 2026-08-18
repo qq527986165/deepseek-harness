@@ -52,7 +52,7 @@ function fakeProvider(overrides: Partial<MemoryProvider> = {}): ProviderSpies & 
   return { provider: { write, read, search, traverse }, write, read, search, traverse }
 }
 
-async function mounted(config: Parameters<typeof MemoryService.prototype.constructor>[1] = { dshHome: HOME }) {
+async function mounted(config: { dir?: string; dshHome?: string } = { dshHome: HOME }) {
   const ctx = new Context()
   await ctx.plugin(MemoryService, config)
   return ctx
@@ -176,7 +176,7 @@ describe('MemoryService', () => {
     const ctx = await mounted()
     let resolveWrite: (() => void) | undefined
     const pending = new Promise<void>((resolve) => { resolveWrite = resolve })
-    const { provider } = fakeProvider({ write: vi.fn(async () => { await pending; return { id: MemoryNoteId('n1'), scope: 'global', title: 't', path: 'p', created: 'c', updated: 'u' } }) })
+    const { provider } = fakeProvider({ write: vi.fn(async (): Promise<MemoryWriteResult> => { await pending; return { id: MemoryNoteId('n1'), scope: 'global', title: 't', path: 'p', created: 'c', updated: 'u' } }) })
     const dispose = ctx.memory.register(provider)
     const write = ctx.memory.write({ scope: 'global', title: 't', content: 'c' }, undefined)
 
@@ -206,7 +206,7 @@ describe('MemoryService', () => {
     const ctx = await mounted()
     let resolveWrite: (() => void) | undefined
     const pending = new Promise<void>((resolve) => { resolveWrite = resolve })
-    const { provider } = fakeProvider({ write: vi.fn(async () => { await pending; return { id: MemoryNoteId('n1'), scope: 'global', title: 't', path: 'p', created: 'c', updated: 'u' } }) })
+    const { provider } = fakeProvider({ write: vi.fn(async (): Promise<MemoryWriteResult> => { await pending; return { id: MemoryNoteId('n1'), scope: 'global', title: 't', path: 'p', created: 'c', updated: 'u' } }) })
     ctx.memory.register(provider)
     const write = ctx.memory.write({ scope: 'global', title: 't', content: 'c' }, undefined)
 

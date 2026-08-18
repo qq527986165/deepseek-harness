@@ -163,6 +163,8 @@ const SENTENCE_MODEL_EXPERIENCE: Readonly<Record<string, SentenceContract>> = {
   'packages/web/web-fetch-http': { kind: 'indirect', reason: 'The provider backend delegates model rendering to dsh-tool-web.' },
   'packages/web/web-search-exa': { kind: 'indirect', reason: 'The provider backend delegates model rendering to dsh-tool-web.' },
   'packages/workflow/workflow': { kind: 'indirect', reason: 'The service delegates parent and child model rendering to its consumer and engine.' },
+  'packages/memory/memory': { kind: 'indirect', reason: 'The sole-provider seam registers no tools and injects no prompt text; dsh-tool-memory owns all model rendering.' },
+  'packages/memory/memory-local': { kind: 'indirect', reason: 'The file-first provider registers no tools and injects no prompt text; dsh-tool-memory owns all model rendering.' },
 }
 
 interface Failure {

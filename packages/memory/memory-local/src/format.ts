@@ -20,7 +20,11 @@ export interface NoteFrontmatter {
   related: readonly string[]
 }
 
-/** Split a markdown document into its frontmatter block and body. */
+/**
+ * Split a markdown document into its frontmatter block and body.
+ * @param text - complete file content.
+ * @returns the raw frontmatter text and the body, or `undefined` frontmatter.
+ */
 export function splitFrontmatter(text: string): { frontmatter: string | undefined; body: string } {
   if (!text.startsWith('---\n')) return { frontmatter: undefined, body: text }
   const end = text.indexOf('\n---\n', 4)
@@ -59,7 +63,12 @@ export function parseNote(text: string): { frontmatter: NoteFrontmatter; body: s
   }
 }
 
-/** Serialize one note to its on-disk markdown form. */
+/**
+ * Serialize one note to its on-disk markdown form.
+ * @param frontmatter - provider-owned fields to stamp.
+ * @param body - note body text.
+ * @returns the complete markdown document.
+ */
 export function stringifyNote(frontmatter: NoteFrontmatter, body: string): string {
   const yaml = stringify({
     id: frontmatter.id,
@@ -73,7 +82,11 @@ export function stringifyNote(frontmatter: NoteFrontmatter, body: string): strin
   return `---\n${yaml}---\n${body}`
 }
 
-/** Lowercase one title into a filesystem-safe slug segment. */
+/**
+ * Lowercase one title into a filesystem-safe slug segment.
+ * @param title - raw note title.
+ * @returns the slug, never empty.
+ */
 export function slugify(title: string): string {
   const slug = title
     .toLowerCase()

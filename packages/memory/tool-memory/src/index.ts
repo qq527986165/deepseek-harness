@@ -37,12 +37,22 @@ async function resolveWriteScope(ctx: Context, exec: ToolRunContext, scope: stri
   return scopes.includes('project') ? 'project' : 'global'
 }
 
-/** Render one written note reference for the model. */
+/**
+ * Render one written note reference for the model.
+ * @param scope - the vault scope the note landed in.
+ * @param title - note title.
+ * @param path - note path relative to its vault root.
+ * @returns one text content block.
+ */
 export function renderWrite(scope: MemoryScope, title: string, path: string): ContentBlock[] {
   return [{ type: 'text', text: `Wrote memory note "${title}" (${scope} scope) at ${path}.` }]
 }
 
-/** Render one read note for the model: body plus both link directions. */
+/**
+ * Render one read note for the model: body plus both link directions.
+ * @param note - the resolved note.
+ * @returns one text content block.
+ */
 export function renderRead(note: MemoryNote): ContentBlock[] {
   const lines = [`# ${note.title}`, '', note.body]
   const related = note.related.map(target => target.id === undefined ? target.title : `${target.title} (resolved)`)
@@ -53,14 +63,22 @@ export function renderRead(note: MemoryNote): ContentBlock[] {
   return [{ type: 'text', text: lines.join('\n') }]
 }
 
-/** Render one search hit list for the model. */
+/**
+ * Render one search hit list for the model.
+ * @param hits - ranked hits, project first.
+ * @returns one text content block.
+ */
 export function renderSearch(hits: readonly { scope: MemoryScope; title: string; snippet: string }[]): ContentBlock[] {
   if (hits.length === 0) return [{ type: 'text', text: 'No memory notes matched the query.' }]
   const lines = hits.map((hit, index) => `${index + 1}. ${hit.title} (${hit.scope}): ${hit.snippet}`)
   return [{ type: 'text', text: lines.join('\n') }]
 }
 
-/** Render one traversal result for the model. */
+/**
+ * Render one traversal result for the model.
+ * @param traversal - start note and bounded adjacency.
+ * @returns one text content block.
+ */
 export function renderTraverse(traversal: MemoryTraversal): ContentBlock[] {
   const lines = [`From "${traversal.start.title}":`]
   if (traversal.nodes.length === 0) {
@@ -208,7 +226,10 @@ const TRAVERSE_OUTPUT = {
   render: (_args: unknown, value: unknown) => renderTraverse(value as MemoryTraversal),
 }
 
-/** Register the four memory tools on the shared registry. */
+/**
+ * Register the four memory tools on the shared registry.
+ * @param ctx - Cordis context carrying the memory service and tool registry.
+ */
 export function apply(ctx: Context): void {
   ctx.tools.register(defineTool({
     name: 'memory_write',

@@ -2,7 +2,6 @@ import { Context } from '@deepseek-ai/cordis'
 import { mkdtemp, mkdir, rm, writeFile, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { EventEmitter } from 'node:events'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import MemoryService from '@deepseek-ai/dsh-memory'
 import { LocalMemoryProvider, apply, extractWikiLinks, inject, name, resolveConfig, silentWarn } from '@deepseek-ai/dsh-memory-local'
@@ -24,9 +23,19 @@ const globalDir = () => join(root, 'home', 'memory')
 const projectDir = () => join(root, 'work', 'proj', '.dsh', 'memory')
 const chain = () => [projectDir(), globalDir()]
 
-class FakeHandle extends EventEmitter implements WatchLike {
+class FakeHandle implements WatchLike {
   closed = false
-  constructor(readonly dir: string) { super() }
+  private readonly listeners = new Map<string, Array<(...args: unknown[]) => void>>()
+  constructor(readonly dir: string) {}
+  on(event: string, listener: (...args: unknown[]) => void): unknown {
+    const list = this.listeners.get(event) ?? []
+    list.push(listener)
+    this.listeners.set(event, list)
+    return this
+  }
+  emit(event: string, ...args: unknown[]): void {
+    for (const listener of this.listeners.get(event) ?? []) listener(...args)
+  }
   async close(): Promise<void> { this.closed = true }
 }
 

@@ -5,6 +5,7 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import MemoryService, { MemoryNoteId, PROJECT_MEMORY_DIR } from '@deepseek-ai/dsh-memory'
 import type { MemoryNote, MemoryProvider, MemoryTraversal, MemoryWriteResult } from '@deepseek-ai/dsh-memory'
+import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { tmpdir } from 'node:os'
@@ -76,6 +77,11 @@ async function setup(options: { registry?: boolean } = {}): Promise<Context> {
   return ctx
 }
 
+
+function textOf(blocks: ContentBlock[]): string {
+  return blocks.filter(block => block.type === 'text').map(block => block.text).join('')
+}
+
 let callCounter = 0
 function call(ctx: Context, name: string, args: unknown, cwd?: string) {
   return ctx.tools.execute({
@@ -125,7 +131,7 @@ describe('memory_write', () => {
       expect.anything(),
     )
     expect(result.content[0]).toMatchObject({ type: 'text' })
-    expect(String(result.content[0]?.text)).toContain('project')
+    expect(textOf(result.content)).toContain('project')
     await ctx.fiber.dispose()
   })
 
@@ -154,7 +160,7 @@ describe('memory_write', () => {
     )
     const invalid = await call(ctx, 'memory_write', { scope: 'other', title: 'T', content: 'C' })
     expect(invalid.isError).toBe(true)
-    expect(String(invalid.content[0]?.text)).toContain('scope must be "project" or "global"')
+    expect(textOf(invalid.content)).toContain('scope must be "project" or "global"')
     await ctx.fiber.dispose()
   })
 
@@ -162,7 +168,7 @@ describe('memory_write', () => {
     const ctx = await setup()
     const failed = await call(ctx, 'memory_write', { title: 'T' })
     expect(failed.isError).toBe(true)
-    expect(String(failed.content[0]?.text)).toContain('content')
+    expect(textOf(failed.content)).toContain('content')
     await ctx.fiber.dispose()
   })
 
@@ -175,7 +181,7 @@ describe('memory_write', () => {
       arguments: { ref: 'n1' },
     })
     expect(failed.isError).toBe(true)
-    expect(String(failed.content[0]?.text)).toContain('require an agent caller')
+    expect(textOf(failed.content)).toContain('require an agent caller')
     await ctx.fiber.dispose()
   })
 })
@@ -188,16 +194,16 @@ describe('memory_read, memory_search, and memory_traverse', () => {
 
     const read = await call(ctx, 'memory_read', { ref: 'n1' }, CWD)
     expect(provider.read).toHaveBeenCalledWith('n1', [PROJECT_DIR, GLOBAL_DIR], expect.anything())
-    expect(String(read.content[0]?.text)).toContain('A note')
-    expect(String(read.content[0]?.text)).toContain('Backlinks: Source')
+    expect(textOf(read.content)).toContain('A note')
+    expect(textOf(read.content)).toContain('Backlinks: Source')
 
     const search = await call(ctx, 'memory_search', { query: 'vitest', limit: 3 }, CWD)
     expect(provider.search).toHaveBeenCalledWith('vitest', { limit: 3 }, [PROJECT_DIR, GLOBAL_DIR], expect.anything())
-    expect(String(search.content[0]?.text)).toContain('A note (project)')
+    expect(textOf(search.content)).toContain('A note (project)')
 
     const traverse = await call(ctx, 'memory_traverse', { ref: 'n1', depth: 2, kinds: ['wikilink'] }, CWD)
     expect(provider.traverse).toHaveBeenCalledWith('n1', { depth: 2, kinds: ['wikilink'] }, [PROJECT_DIR, GLOBAL_DIR], expect.anything())
-    expect(String(traverse.content[0]?.text)).toContain('out wikilink')
+    expect(textOf(traverse.content)).toContain('out wikilink')
     await ctx.fiber.dispose()
   })
 
@@ -216,16 +222,16 @@ describe('memory_read, memory_search, and memory_traverse', () => {
 describe('render helpers', () => {
   it('renders empty search results and dangling traversal nodes', () => {
     const empty = tool.renderSearch([])
-    expect(String(empty[0]?.text)).toBe('No memory notes matched the query.')
+    expect(textOf(empty)).toBe('No memory notes matched the query.')
     const dangling = tool.renderTraverse({
       start: { id: MemoryNoteId('n1'), title: 'Start' },
       nodes: [{ title: 'Ghost', via: { kind: 'wikilink', direction: 'out' } }, { id: MemoryNoteId('n2'), title: 'Real', via: { kind: 'related', direction: 'in' } }],
       truncated: true,
     })
-    const text = String(dangling[0]?.text)
+    const text = textOf(dangling)
     expect(text).toContain('Ghost (dangling)')
     expect(text).toContain('truncated')
-    expect(tool.renderTraverse({ start: { id: MemoryNoteId('n1'), title: 'Start' }, nodes: [], truncated: false })[0]?.text).toContain('No linked notes')
+    expect(textOf(tool.renderTraverse({ start: { id: MemoryNoteId('n1'), title: 'Start' }, nodes: [], truncated: false }))).toContain('No linked notes')
   })
 
   it('renders a read note without links and tags', () => {
@@ -239,7 +245,7 @@ describe('render helpers', () => {
       related: [],
       backlinks: [],
     }
-    const text = String(tool.renderRead(note)[0]?.text)
+    const text = textOf(tool.renderRead(note))
     expect(text).toContain('just body')
     expect(text).toContain('(none)')
     expect(text).not.toContain('Related')
@@ -256,7 +262,7 @@ describe('render helpers', () => {
       related: [{ id: MemoryNoteId('n2'), title: 'Resolved' }, { title: 'Dangling' }],
       backlinks: [{ id: MemoryNoteId('n3'), title: 'Source' }],
     }
-    const text = String(tool.renderRead(note)[0]?.text)
+    const text = textOf(tool.renderRead(note))
     expect(text).toContain('Resolved (resolved)')
     expect(text).toContain('Dangling')
     expect(text).toContain('Backlinks: Source')
@@ -265,7 +271,7 @@ describe('render helpers', () => {
 
   it('renders write results for both scopes', () => {
     const written = tool.renderWrite('project', 'T', 'notes/t.md')
-    expect(String(written[0]?.text)).toContain('(project scope)')
-    expect(String(tool.renderWrite('global', 'T', 'p')[0]?.text)).toContain('(global scope)')
+    expect(textOf(written)).toContain('(project scope)')
+    expect(textOf(tool.renderWrite('global', 'T', 'p'))).toContain('(global scope)')
   })
 })

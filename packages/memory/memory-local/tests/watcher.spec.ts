@@ -1,4 +1,3 @@
-import { EventEmitter } from 'node:events'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { VaultWatcher } from '../src/watcher.ts'
@@ -6,13 +5,24 @@ import type { WatchImpl, WatchLike } from '../src/watcher.ts'
 
 const DIR = join('vault')
 
-class FakeHandle extends EventEmitter implements WatchLike {
+class FakeHandle implements WatchLike {
   closed = false
   options: Record<string, unknown> | undefined
+  private readonly listeners = new Map<string, Array<(...args: unknown[]) => void>>()
 
   constructor(readonly dir: string, options?: Record<string, unknown>) {
-    super()
     this.options = options
+  }
+
+  on(event: string, listener: (...args: unknown[]) => void): unknown {
+    const list = this.listeners.get(event) ?? []
+    list.push(listener)
+    this.listeners.set(event, list)
+    return this
+  }
+
+  emit(event: string, ...args: unknown[]): void {
+    for (const listener of this.listeners.get(event) ?? []) listener(...args)
   }
 
   async close(): Promise<void> {
