@@ -44,7 +44,7 @@ function fakeProvider(overrides: Partial<MemoryProvider> = {}): ProviderSpies & 
     created: 't0',
     updated: 't0',
   }
-  const traversal: MemoryTraversal = { start: { id: MemoryNoteId('n1'), title: 'A note' }, nodes: [] }
+  const traversal: MemoryTraversal = { start: { id: MemoryNoteId('n1'), title: 'A note' }, nodes: [], truncated: false }
   const write = overrides.write ?? vi.fn(async () => result)
   const read = overrides.read ?? vi.fn(async () => note)
   const search = overrides.search ?? vi.fn(async () => [])

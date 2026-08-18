@@ -97,6 +97,8 @@ export interface MemoryTraversalNode {
 export interface MemoryTraversal {
   readonly start: { readonly id: MemoryNoteId; readonly title: string }
   readonly nodes: readonly MemoryTraversalNode[]
+  /** True when the provider's node cap cut the adjacency short. */
+  readonly truncated: boolean
 }
 
 /**
