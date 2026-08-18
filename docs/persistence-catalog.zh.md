@@ -496,6 +496,38 @@ export type SessionEvent<T extends SessionEventType = SessionEventType> = {
 
 来源：[`packages/llm/llm-retry/src/types.ts:11`](../packages/llm/llm-retry/src/types.ts)
 
+### `memory/*`
+
+<a id="memorydistill--log-only"></a>
+
+#### `memory/distill` — log-only
+
+```ts persistence-catalog
+/**
+ * Every write one distillation pass committed, plus its journal append and
+ * auxiliary route. Log-only: together with the pass's `turn/end` and the
+ * vault files it names, the log reconstructs every silent memory mutation.
+ */
+'memory/distill': MemoryDistillEventData
+```
+
+来源：[`packages/memory/memory-lifecycle/src/types.ts:82`](../packages/memory/memory-lifecycle/src/types.ts)
+
+<a id="memoryinject--log-only"></a>
+
+#### `memory/inject` — log-only
+
+```ts persistence-catalog
+/**
+ * Provenance of one memory context injection. The injected text itself is
+ * logged as the matching `user/message`; this log-only event records which
+ * files were loaded and why, so the injected set reconstructs from the log.
+ */
+'memory/inject': MemoryInjectEventData
+```
+
+来源：[`packages/memory/memory-lifecycle/src/types.ts:76`](../packages/memory/memory-lifecycle/src/types.ts)
+
 ### `permission/*`
 
 <a id="permissionpreset--log-only"></a>

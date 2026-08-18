@@ -101,6 +101,54 @@ export interface MemoryTraversal {
   readonly truncated: boolean
 }
 
+/** One vault's persona note (`MEMORY.md`) read whole for session-start injection. */
+export interface MemoryPersona {
+  /** Absolute vault directory the note came from. */
+  readonly dir: string
+  /** Note path relative to the vault root; always `MEMORY.md`. */
+  readonly path: string
+  /** Raw markdown text of the persona note. */
+  readonly text: string
+}
+
+/** One topic note in the recency window, without link resolution. */
+export interface MemoryRecentNote {
+  /** Note path relative to its vault root, always under `notes/`. */
+  readonly path: string
+  readonly title: string
+  readonly body: string
+  /** Index timestamp in epoch milliseconds of the latest indexed update. */
+  readonly updated: number
+}
+
+/** Recency-window options. */
+export interface MemoryRecentOptions {
+  /** Maximum topic notes to return, most recently updated first. */
+  readonly limit?: number
+}
+
+/** Appending journal entry input: the service routes it by `scope` like a write. */
+export interface MemoryJournalAppendInput {
+  /** Which vault's `journal/` file the entry appends to. */
+  readonly scope: MemoryScope
+  /** Target journal day, `YYYY-MM-DD` in UTC; defaults to today (UTC). */
+  readonly date?: string
+  /** Entry heading: the short task narrative title. */
+  readonly title: string
+  /** Entry body in markdown, usually `-` bullets that may carry `[[wikilinks]]`. */
+  readonly body: string
+}
+
+/** One committed journal append. */
+export interface MemoryJournalAppendResult {
+  /** Absolute vault directory the journal file lives in. */
+  readonly dir: string
+  /** Journal file path relative to the vault root, e.g. `journal/2026-08-18.md`. */
+  readonly path: string
+  /** The entry's journal day, `YYYY-MM-DD` in UTC. */
+  readonly date: string
+}
+
 /**
  * Storage-and-index provider bound through {@link MemoryService.register}.
  * Vault directories are explicit arguments: the service owns scope resolution,
@@ -116,4 +164,10 @@ export interface MemoryProvider {
   search(query: string, opts: MemorySearchOptions | undefined, dirs: readonly string[], signal?: AbortSignal): Promise<MemorySearchHit[]>
   /** Bounded link adjacency around one note, within the note's own vault. */
   traverse(ref: string, opts: MemoryTraverseOptions | undefined, dirs: readonly string[], signal?: AbortSignal): Promise<MemoryTraversal>
+  /** Read one vault's persona note whole, or `undefined` when the vault has none. */
+  readPersona(dir: string, signal?: AbortSignal): Promise<{ path: string; text: string } | undefined>
+  /** Topic notes under `notes/`, most recently updated first, capped by `limit`. */
+  recentNotes(opts: MemoryRecentOptions | undefined, dir: string, signal?: AbortSignal): Promise<MemoryRecentNote[]>
+  /** Append one entry to a day's journal file on the vault's exclusive chain. */
+  appendJournal(input: MemoryJournalAppendInput, dir: string, signal?: AbortSignal): Promise<{ path: string; date: string }>
 }

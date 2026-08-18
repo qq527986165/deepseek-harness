@@ -6,7 +6,6 @@
  */
 
 import { watch as chokidarWatch } from 'chokidar'
-import { join, sep } from 'node:path'
 import { MEMORY_INDEX_FILE } from './schema.ts'
 
 /** The chokidar surface the watcher needs; tests supply a fake. */
@@ -43,7 +42,14 @@ export class VaultWatcher {
   start(): void {
     if (this.handle !== undefined || this.closed) return
     this.handle = this.watchImpl(this.dir, { ignoreInitial: true, ignored: (path: unknown) => this.ignored(path) })
-    this.handle.on('all', (_event, path) =>{  this.enqueue(String(path)) })
+    this.handle.on('all', (event, path) => {
+      // Directory events and non-markdown files are watched but not indexed:
+      // chokidar's ignored predicate receives no directory stats, so extension
+      // filtering must run here on the event name instead.
+      if (event === 'addDir' || event === 'unlinkDir') return
+      if (!String(path).endsWith('.md')) return
+      this.enqueue(String(path))
+    })
     this.handle.on('ready', () => {
       if (this.closed) return
       this.pending.clear()
@@ -65,10 +71,11 @@ export class VaultWatcher {
   }
 
   private ignored(path: unknown): boolean {
-    const value = String(path)
-    if (value === join(this.dir, MEMORY_INDEX_FILE)) return true
-    if (value.includes(`${sep}.obsidian${sep}`) || value.endsWith(`${sep}.obsidian`)) return true
-    return !value.endsWith('.md')
+    // chokidar hands predicates unix-normalized paths; compare on the same form.
+    const value = String(path).replaceAll('\\', '/')
+    const dir = this.dir.replaceAll('\\', '/')
+    if (value === `${dir}/${MEMORY_INDEX_FILE}`) return true
+    return value.includes('/.obsidian/') || value.endsWith('/.obsidian')
   }
 
   private enqueue(path: string): void {

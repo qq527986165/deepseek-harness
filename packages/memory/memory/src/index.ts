@@ -14,8 +14,13 @@ import { join, resolve } from 'node:path'
 // augmentation. The registry stays optional at runtime — see `resolveScopes`.
 import type {} from '@deepseek-ai/dsh-workspace'
 import type {
+  MemoryJournalAppendInput,
+  MemoryJournalAppendResult,
   MemoryNote,
+  MemoryPersona,
   MemoryProvider,
+  MemoryRecentNote,
+  MemoryRecentOptions,
   MemoryScope,
   MemorySearchHit,
   MemorySearchOptions,
@@ -26,10 +31,15 @@ import type {
 } from './types.ts'
 
 export type {
+  MemoryJournalAppendInput,
+  MemoryJournalAppendResult,
   MemoryLinkKind,
   MemoryLinkTarget,
   MemoryNote,
+  MemoryPersona,
   MemoryProvider,
+  MemoryRecentNote,
+  MemoryRecentOptions,
   MemoryScope,
   MemorySearchHit,
   MemorySearchOptions,
@@ -44,6 +54,18 @@ export { MemoryNoteId } from './types.ts'
 declare module '@deepseek-ai/cordis' {
   interface Context {
     memory: MemoryService
+  }
+
+  interface Events {
+    /**
+     * The registered provider finished a watcher-driven reconciliation of one
+     * vault directory. Consumers tracking injected context compare the changed
+     * files against what they loaded.
+     * @param payload.dir - absolute vault directory that changed.
+     * @param payload.paths - changed markdown file paths relative to the vault root.
+     * @mode emit
+     */
+    'memory/change'(payload: { dir: string; paths: string[] }): void
   }
 }
 
@@ -219,6 +241,84 @@ export class MemoryService extends Service {
     return this.traverseScoped(ref, opts, await this.dirsFor(cwd), signal)
   }
 
+  /**
+   * Read one note by id or exact title within one explicit scope, skipping the
+   * chain. Used by consumers that must merge into or read from a specific
+   * vault regardless of same-title notes elsewhere.
+   * @param ref - note id or exact title.
+   * @param scope - the single vault to resolve within.
+   * @param cwd - caller session working directory.
+   * @param signal - caller cancellation.
+   * @returns the resolved note with both link directions.
+   */
+  async readInScope(
+    ref: string,
+    scope: MemoryScope,
+    cwd: string | undefined,
+    signal?: AbortSignal,
+  ): Promise<MemoryNote> {
+    signal?.throwIfAborted()
+    const dir = scope === 'project' ? await this.projectVaultOrThrow(cwd) : this.globalDir
+    return this.track(this.expectProvider().read(ref, [dir], signal))
+  }
+
+  /**
+   * Read one vault's persona note (`MEMORY.md`) whole. `scope: 'project'`
+   * requires the caller's cwd to resolve to a registered workspace.
+   * @param scope - which vault's persona note to read.
+   * @param cwd - caller session working directory.
+   * @param signal - caller cancellation.
+   * @returns the persona note, or `undefined` when the vault has no `MEMORY.md`.
+   */
+  async readPersona(scope: MemoryScope, cwd: string | undefined, signal?: AbortSignal): Promise<MemoryPersona | undefined> {
+    signal?.throwIfAborted()
+    const dir = scope === 'project' ? await this.projectVaultOrThrow(cwd) : this.globalDir
+    const persona = await this.track(this.expectProvider().readPersona(dir, signal))
+    return persona === undefined ? undefined : { dir, ...persona }
+  }
+
+  /**
+   * The project vault's most recently updated topic notes, newest first.
+   * Requires the caller's cwd to resolve to a registered workspace; callers
+   * that tolerate global-only sessions check `resolveScopes` first.
+   * @param opts - optional window size, bounded by provider defaults.
+   * @param cwd - caller session working directory.
+   * @param signal - caller cancellation.
+   * @returns the vault directory and its recency-window notes.
+   */
+  async recent(
+    opts: MemoryRecentOptions | undefined,
+    cwd: string | undefined,
+    signal?: AbortSignal,
+  ): Promise<{ dir: string; notes: MemoryRecentNote[] }> {
+    signal?.throwIfAborted()
+    const dir = await this.projectVaultOrThrow(cwd)
+    return this.track(this.expectProvider().recentNotes(opts, dir, signal).then(notes => ({ dir, notes })))
+  }
+
+  /**
+   * Append one entry to a day's journal file. `scope: 'project'` requires the
+   * caller's cwd to resolve to a registered workspace. The provider serializes
+   * appends on the vault's exclusive chain, so concurrent sessions never
+   * interleave inside one file.
+   * @param input - journal scope, optional day, heading, and markdown body.
+   * @param cwd - caller session working directory.
+   * @param signal - caller cancellation.
+   * @returns the committed journal file reference.
+   */
+  async appendJournal(
+    input: MemoryJournalAppendInput,
+    cwd: string | undefined,
+    signal?: AbortSignal,
+  ): Promise<MemoryJournalAppendResult> {
+    signal?.throwIfAborted()
+    const dir = input.scope === 'project'
+      ? await this.projectVaultOrThrow(cwd)
+      : this.globalDir
+    const result = await this.track(this.expectProvider().appendJournal(input, dir, signal))
+    return { dir, ...result }
+  }
+
   /** Resolve the ordered vault directories for one cwd: project first, global last. */
   private async dirsFor(cwd: string | undefined): Promise<string[]> {
     const scopes = await this.resolveScopes(cwd)
@@ -293,7 +393,7 @@ export class MemoryService extends Service {
     if (candidate === null || typeof candidate !== 'object') {
       throw new Error('memory provider must be an object')
     }
-    for (const method of ['write', 'read', 'search', 'traverse']) {
+    for (const method of ['write', 'read', 'search', 'traverse', 'readPersona', 'recentNotes', 'appendJournal']) {
       if (typeof candidate[method] !== 'function') {
         throw new Error(`memory provider must implement ${method}()`)
       }

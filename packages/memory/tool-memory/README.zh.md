@@ -59,5 +59,5 @@
 ## Known Limitations and Deferred Work
 
 - **没有 `memory_delete` 工具** —— 删除是 Phase 3 的生命周期决策（审核、TTL、链接修复）；用户仍可直接编辑或删除 vault 文件。
-- **没有自动召回注入** —— 工具是 Phase 1 唯一面向模型的接口；会话开始注入、每回合蒸馏与引导 section 在 Phase 2 到来。
+- **只做显式写入** —— 工具是显式召回接口；自动召回注入、每回合蒸馏与引导 section 位于独立的 `dsh-memory-lifecycle` 消费方。
 - **精确标题查找** —— `memory_read`/`memory_traverse` 按 id 或精确标题解析；模糊标题匹配延期到 Phase 4 检索提供方。

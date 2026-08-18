@@ -105,17 +105,29 @@ interface ReadNoteValue {
   backlinks: Array<{ title: string; id?: string }>
 }
 
+/** One required-string schema field. */
+function requiredString(): { type: 'string'; required: true } {
+  return { type: 'string', required: true }
+}
+
+/** The id/scope/title/path identity fields shared by note-shaped output schemas. */
+function identityFields(): Record<string, unknown> {
+  return {
+    id: requiredString(),
+    scope: requiredString(),
+    title: requiredString(),
+    path: requiredString(),
+  }
+}
+
 const WRITE_OUTPUT = {
   schema: {
     type: 'object' as const,
     additionalProperties: false,
     properties: {
-      id: { type: 'string' as const, required: true as const },
-      scope: { type: 'string' as const, required: true as const },
-      title: { type: 'string' as const, required: true as const },
-      path: { type: 'string' as const, required: true as const },
-      created: { type: 'string' as const, required: true as const },
-      updated: { type: 'string' as const, required: true as const },
+      ...identityFields(),
+      created: requiredString(),
+      updated: requiredString(),
     },
   },
   render: (_args: unknown, value: unknown) => {
@@ -128,7 +140,7 @@ const LINK_TARGET_SCHEMA = {
   type: 'object' as const,
   additionalProperties: false,
   properties: {
-    title: { type: 'string' as const, required: true as const },
+    title: requiredString(),
     id: { type: 'string' as const },
   },
 }
@@ -137,12 +149,9 @@ const NOTE_SCHEMA = {
   type: 'object' as const,
   additionalProperties: false,
   properties: {
-    id: { type: 'string' as const, required: true as const },
-    scope: { type: 'string' as const, required: true as const },
-    title: { type: 'string' as const, required: true as const },
-    path: { type: 'string' as const, required: true as const },
+    ...identityFields(),
     tags: { type: 'array' as const, items: { type: 'string' as const }, required: true as const },
-    body: { type: 'string' as const, required: true as const },
+    body: requiredString(),
     related: { type: 'array' as const, items: LINK_TARGET_SCHEMA, required: true as const },
     backlinks: { type: 'array' as const, items: LINK_TARGET_SCHEMA, required: true as const },
   },
@@ -168,10 +177,10 @@ const SEARCH_OUTPUT = {
           type: 'object' as const,
           additionalProperties: false,
           properties: {
-            id: { type: 'string' as const, required: true as const },
-            scope: { type: 'string' as const, required: true as const },
-            title: { type: 'string' as const, required: true as const },
-            snippet: { type: 'string' as const, required: true as const },
+            id: requiredString(),
+            scope: requiredString(),
+            title: requiredString(),
+            snippet: requiredString(),
             tags: { type: 'array' as const, items: { type: 'string' as const }, required: true as const },
           },
         },

@@ -9,6 +9,39 @@ import { parseDocument, stringify } from 'yaml'
 /** The markdown file a provider write targets: topic notes live under `notes/`. */
 export const NOTES_DIR = 'notes'
 
+/** The subfolder journal entries append to: one dated file per active day. */
+export const JOURNAL_DIR = 'journal'
+
+/** The date a journal file's frontmatter stamps and its filename derives from. */
+const JOURNAL_DATE = /^\d{4}-\d{2}-\d{2}$/
+
+/**
+ * Validate one journal day as a real `YYYY-MM-DD` UTC calendar date.
+ * @param date - candidate day string.
+ * @returns the unchanged date string.
+ */
+export function validateJournalDate(date: string): string {
+  if (!JOURNAL_DATE.test(date)) {
+    throw new Error(`memory-local: journal date must be YYYY-MM-DD, got "${date}"`)
+  }
+  const [year = 0, month = 0, day = 0] = date.split('-').map(part => Number(part))
+  const utc = Date.UTC(year, month - 1, day)
+  const roundTrip = new Date(utc).toISOString().slice(0, 10)
+  if (roundTrip !== date) {
+    throw new Error(`memory-local: journal date "${date}" is not a real calendar day`)
+  }
+  return date
+}
+
+/**
+ * Serialize the frontmatter a new day's journal file starts with.
+ * @param date - the validated journal day.
+ * @returns the complete frontmatter block.
+ */
+export function stringifyJournalFrontmatter(date: string): string {
+  return `---\n${stringify({ type: 'journal', date })}---`
+}
+
 /** Frontmatter fields the provider owns and parses back. */
 export interface NoteFrontmatter {
   id: string

@@ -157,6 +157,7 @@
     { "path": "./packages/memory/memory" },
     { "path": "./packages/memory/memory-local" },
     { "path": "./packages/memory/tool-memory" },
+    { "path": "./packages/memory/memory-lifecycle" },
     { "path": "./packages/session/session-title" },
     { "path": "./packages/session/session-title-llm" },
     { "path": "./packages/session/session-title-first-prompt-llm" },

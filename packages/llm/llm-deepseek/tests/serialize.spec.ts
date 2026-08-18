@@ -250,6 +250,19 @@ describe('serializeRequest', () => {
     expect(wire.reasoning_effort).toBeUndefined()
   })
 
+  it('disables thinking for memory-distill requests like session-title', () => {
+    const wire = serializeRequest(
+      request({
+        messages: history,
+        purpose: 'memory-distill',
+        reasoningEffort: ReasoningEffortId('max'),
+      }),
+      { thinking: 'enabled', reasoningEffort: 'max' },
+    )
+    expect(wire.thinking).toEqual({ type: 'disabled' })
+    expect(wire.reasoning_effort).toBeUndefined()
+  })
+
   it('omits thinking fields when unset (provider default applies)', () => {
     const wire = serializeRequest(request({ messages: history }))
     expect(wire.thinking).toBeUndefined()

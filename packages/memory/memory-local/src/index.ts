@@ -11,13 +11,16 @@ import { watch as chokidarWatch } from 'chokidar'
 import { randomUUID } from 'node:crypto'
 import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises'
 import type { DatabaseSync } from 'node:sqlite'
-import { basename, dirname, join, sep } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 import { MemoryError, MemoryNoteId } from '@deepseek-ai/dsh-memory'
 import type {
+  MemoryJournalAppendInput,
   MemoryLinkTarget,
   MemoryNote,
   MemoryProvider,
+  MemoryRecentNote,
+  MemoryRecentOptions,
   MemorySearchHit,
   MemorySearchOptions,
   MemoryTraversal,
@@ -26,7 +29,7 @@ import type {
   MemoryWriteInput,
   MemoryWriteResult,
 } from '@deepseek-ai/dsh-memory'
-import { newNotePath, parseNote, stringifyNote } from './format.ts'
+import { JOURNAL_DIR, NOTES_DIR, newNotePath, parseNote, stringifyJournalFrontmatter, stringifyNote, validateJournalDate } from './format.ts'
 import {
   MEMORY_INDEX_FILE,
   findIndexedNote,
@@ -126,6 +129,7 @@ class Vault {
     private readonly config: ResolvedConfig,
     private readonly watchImpl: WatchImpl,
     private readonly warn: (error: unknown) => void,
+    private readonly onChange: (dir: string, paths: readonly string[]) => void,
   ) {}
 
   /** Open the directory, index, and watcher, then run the initial full reconcile. */
@@ -134,7 +138,7 @@ class Vault {
     this.db = await openIndexFile(this.dir)
     await this.reconcile()
     if (this.config.watch) {
-      this.watcher = new VaultWatcher(this.dir, this.config.debounceMs, paths => this.reconcile(paths), this.watchImpl, this.warn)
+      this.watcher = new VaultWatcher(this.dir, this.config.debounceMs, paths => this.onWatcherBatch(paths), this.watchImpl, this.warn)
       this.watcher.start()
     }
   }
@@ -153,6 +157,12 @@ class Vault {
     const run = this.operations.then(work)
     this.operations = run.then(() => undefined, () => undefined)
     return run
+  }
+
+  /** Index one watcher batch, then report its changed files to change consumers. */
+  private async onWatcherBatch(paths: string[]): Promise<void> {
+    await this.reconcile(paths)
+    this.onChange(this.dir, paths.map(path => relative(this.dir, path).split(sep).join('/')))
   }
 
   /** Full or incremental index reconciliation from vault files. */
@@ -186,7 +196,10 @@ class Vault {
   /** Index one markdown file; `false` means the file is gone and rows must drop. */
   private async indexFile(path: string): Promise<boolean> {
     const db = this.database
-    const absolute = join(this.dir, path)
+    // Index rows always store vault-relative forward-slash paths: reconciled
+    // walk entries arrive native-separated and watcher batches arrive absolute.
+    const rel = (isAbsolute(path) ? relative(this.dir, path) : path).split(sep).join('/')
+    const absolute = join(this.dir, rel)
     let info
     try {
       info = await stat(absolute)
@@ -199,10 +212,10 @@ class Vault {
     const text = await readFile(absolute, 'utf8')
     const parsed = parseNote(text)
     if (parsed === undefined) {
-      const title = basename(path, '.md')
+      const title = basename(rel, '.md')
       upsertIndexedNote(
         db,
-        { id: `adopted:${path}`, path, title, created: info.mtimeMs, updated: info.mtimeMs, tags: [] },
+        { id: `adopted:${rel}`, path: rel, title, created: info.mtimeMs, updated: info.mtimeMs, tags: [] },
         text,
         extractWikiLinks(text),
         [],
@@ -212,7 +225,14 @@ class Vault {
     const created = Number.isFinite(Date.parse(parsed.frontmatter.created)) ? Date.parse(parsed.frontmatter.created) : info.mtimeMs
     upsertIndexedNote(
       db,
-      { id: parsed.frontmatter.id, path, title: parsed.frontmatter.title, created, updated: info.mtimeMs, tags: parsed.frontmatter.tags },
+      {
+        id: parsed.frontmatter.id,
+        path: rel,
+        title: parsed.frontmatter.title,
+        created,
+        updated: info.mtimeMs,
+        tags: parsed.frontmatter.tags,
+      },
       parsed.body,
       extractWikiLinks(parsed.body),
       parsed.frontmatter.related,
@@ -223,7 +243,8 @@ class Vault {
   /** Drop index rows for one missing file. */
   private removeByPath(path: string): void {
     const db = this.database
-    const row = db.prepare('SELECT id FROM notes WHERE path = ?').get(path) as { id: string } | undefined
+    const rel = (isAbsolute(path) ? relative(this.dir, path) : path).split(sep).join('/')
+    const row = db.prepare('SELECT id FROM notes WHERE path = ?').get(rel) as { id: string } | undefined
     if (row !== undefined) removeIndexedNote(db, row.id)
   }
 
@@ -255,7 +276,7 @@ class Vault {
       const entries = await readdir(join(this.dir, dir), { withFileTypes: true })
       for (const entry of entries) {
         if (entry.name === '.obsidian') continue
-        const rel = dir === '' ? entry.name : `${dir}${sep}${entry.name}`
+        const rel = dir === '' ? entry.name : `${dir}/${entry.name}`
         if (entry.isDirectory()) {
           await walk(rel)
         } else if (entry.isFile() && rel !== MEMORY_INDEX_FILE && entry.name.endsWith('.md')) {
@@ -299,6 +320,7 @@ export class LocalMemoryProvider implements MemoryProvider {
     private readonly config: ResolvedConfig,
     watchImpl?: WatchImpl,
     private readonly warn: (error: unknown) => void = silentWarn,
+    private readonly onChange: (dir: string, paths: readonly string[]) => void = () => {},
   ) {
     this.watchImpl = watchImpl ?? chokidarWatch
   }
@@ -307,7 +329,7 @@ export class LocalMemoryProvider implements MemoryProvider {
   private async vault(dir: string): Promise<Vault> {
     let vault = this.vaults.get(dir)
     if (vault === undefined) {
-      vault = new Vault(dir, this.config, this.watchImpl, this.warn)
+      vault = new Vault(dir, this.config, this.watchImpl, this.warn, this.onChange)
       this.vaults.set(dir, vault)
       await vault.open()
     }
@@ -355,6 +377,85 @@ export class LocalMemoryProvider implements MemoryProvider {
         created: frontmatter.created,
         updated: frontmatter.updated,
       }
+    })
+  }
+
+  async readPersona(dir: string, signal?: AbortSignal): Promise<{ path: string; text: string } | undefined> {
+    signal?.throwIfAborted()
+    const path = 'MEMORY.md'
+    let text: string
+    try {
+      text = await readFile(join(dir, path), 'utf8')
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+      throw error
+    }
+    return { path, text }
+  }
+
+  async recentNotes(
+    opts: MemoryRecentOptions | undefined,
+    dir: string,
+    signal?: AbortSignal,
+  ): Promise<MemoryRecentNote[]> {
+    signal?.throwIfAborted()
+    if (opts?.limit !== undefined && (!Number.isInteger(opts.limit) || opts.limit <= 0)) {
+      throw new Error(`memory-local: recent limit must be a positive integer, got ${opts.limit}`)
+    }
+    const cap = Math.min(opts?.limit ?? this.config.maxSearchResults, this.config.maxSearchResults)
+    const vault = await this.vault(dir)
+    return vault.run(async () => {
+      const rows = vault.database.prepare(
+        'SELECT id, path, title, updated FROM notes WHERE path LIKE ? ORDER BY updated DESC, rowid DESC LIMIT ?',
+      ).all(`${NOTES_DIR}/%`, cap) as Array<{ id: string; path: string; title: string; updated: number }>
+      const notes: MemoryRecentNote[] = []
+      for (const row of rows) {
+        signal?.throwIfAborted()
+        const text = await readFile(join(dir, row.path), 'utf8')
+        const parsed = parseNote(text)
+        notes.push({ path: row.path, title: row.title, body: parsed?.body ?? text, updated: row.updated })
+      }
+      return notes
+    })
+  }
+
+  async appendJournal(
+    input: MemoryJournalAppendInput,
+    dir: string,
+    signal?: AbortSignal,
+  ): Promise<{ path: string; date: string }> {
+    signal?.throwIfAborted()
+    const date = validateJournalDate(input.date ?? new Date().toISOString().slice(0, 10))
+    if (input.title.trim() === '' || input.title.includes('\n')) {
+      throw new Error('memory-local: journal title must be a single non-empty line')
+    }
+    if (input.body.trim() === '') {
+      throw new Error('memory-local: journal body must not be empty')
+    }
+    const path = `${JOURNAL_DIR}/${date}.md`
+    const vault = await this.vault(dir)
+    return vault.run(async () => {
+      signal?.throwIfAborted()
+      const absolute = join(dir, path)
+      let text: string
+      try {
+        text = await readFile(absolute, 'utf8')
+      } catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+        text = stringifyJournalFrontmatter(date)
+      }
+      text = `${text.trimEnd()}\n\n## ${input.title}\n${input.body}\n`
+      await mkdir(join(dir, JOURNAL_DIR), { recursive: true })
+      await writeFile(absolute, text, 'utf8')
+      const after = await stat(absolute)
+      upsertIndexedNote(
+        vault.database,
+        { id: `adopted:${path}`, path, title: date, created: after.mtimeMs, updated: after.mtimeMs, tags: [] },
+        text,
+        extractWikiLinks(text),
+        [],
+      )
+      return { path, date }
     })
   }
 
@@ -506,7 +607,9 @@ export class LocalMemoryProvider implements MemoryProvider {
 export function apply(ctx: Context, config: Config = {}): void {
   const resolved = resolveConfig(config)
   /* v8 ignore next -- the plugin-level warn body fires only on real watcher faults. */
-  const provider = new LocalMemoryProvider(resolved, undefined, (error) =>{  ctx.logger.warn('memory-local: %s', String(error)) })
+  const provider = new LocalMemoryProvider(resolved, undefined, (error) =>{  ctx.logger.warn('memory-local: %s', String(error)) }, (dir, paths) => {
+    ctx.emit('memory/change', { dir, paths: [...paths] })
+  })
   ctx.memory.register(provider)
   ctx.effect(() => () => provider.dispose(), 'memory-local lifecycle')
 }

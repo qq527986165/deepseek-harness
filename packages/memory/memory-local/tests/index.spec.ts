@@ -374,6 +374,171 @@ describe('LocalMemoryProvider lifecycle', () => {
   })
 })
 
+describe('LocalMemoryProvider persona, recency, and journal', () => {
+  it('reads the persona note whole or returns undefined without one', async () => {
+    const p = provider(false)
+    await expect(p.readPersona(globalDir())).resolves.toBeUndefined()
+    await mkdir(globalDir(), { recursive: true })
+    await writeFile(join(globalDir(), 'MEMORY.md'), '# Persona\nLikes tea.\n', 'utf8')
+    await expect(p.readPersona(globalDir())).resolves.toEqual({ path: 'MEMORY.md', text: '# Persona\nLikes tea.\n' })
+    await p.dispose()
+  })
+
+  it('rejects an aborted persona read before touching disk', async () => {
+    const p = provider(false)
+    const controller = new AbortController()
+    controller.abort(new Error('stop'))
+    await expect(p.readPersona(globalDir(), controller.signal)).rejects.toThrow('stop')
+    await p.dispose()
+  })
+
+  it('fails loudly when the persona path is not a readable file', async () => {
+    const p = provider(false)
+    await mkdir(join(globalDir(), 'MEMORY.md'), { recursive: true })
+    await expect(p.readPersona(globalDir())).rejects.toThrow()
+    await p.dispose()
+  })
+
+  it('lists topic notes newest first, journal and persona excluded', async () => {
+    const p = provider(false)
+    const first = await p.write(input({ title: 'Older' }), globalDir())
+    const second = await p.write(input({ title: 'Newer' }), globalDir())
+    await p.appendJournal({ scope: 'global', date: '2026-08-18', title: 'Day', body: '- b' }, globalDir())
+    await mkdir(globalDir(), { recursive: true })
+    await writeFile(join(globalDir(), 'MEMORY.md'), 'persona', 'utf8')
+    const recent = await p.recentNotes({ limit: 10 }, globalDir())
+    expect(recent.map(note => note.path)).toEqual([second.path, first.path])
+    expect(recent.map(note => note.title)).toEqual(['Newer', 'Older'])
+    expect(recent.every(note => note.path.startsWith('notes/'))).toBe(true)
+    expect(recent[0]?.body).toBe('Body about vitest.')
+    expect(Number.isFinite(recent[0]?.updated)).toBe(true)
+    await p.dispose()
+  })
+
+  it('caps recency at the config bound and validates explicit limits', async () => {
+    const p = configured({ watch: false, maxSearchResults: 1 })
+    await p.write(input({ title: 'One' }), globalDir())
+    await p.write(input({ title: 'Two' }), globalDir())
+    expect(await p.recentNotes(undefined, globalDir())).toHaveLength(1)
+    expect(await p.recentNotes({ limit: 1 }, globalDir())).toHaveLength(1)
+    await expect(p.recentNotes({ limit: 0 }, globalDir())).rejects.toThrow('recent limit must be a positive integer')
+    await expect(p.recentNotes({ limit: 1.5 }, globalDir())).rejects.toThrow('recent limit must be a positive integer')
+    await p.dispose()
+  })
+
+  it('serves adopted notes with their raw text as the recency body', async () => {
+    const p = provider(false)
+    await mkdir(join(globalDir(), 'notes'), { recursive: true })
+    await writeFile(join(globalDir(), 'notes', 'foreign.md'), 'Adopted raw text.\n', 'utf8')
+    await p.write(input(), globalDir())
+    const recent = await p.recentNotes(undefined, globalDir())
+    expect(recent.map(note => note.path)).toEqual(['notes/my-note.md', 'notes/foreign.md'])
+    expect(recent[1]?.body).toBe('Adopted raw text.\n')
+    await p.dispose()
+  })
+
+  it('honors an abort landed before the recency scan starts', async () => {
+    const p = provider(false)
+    await p.write(input(), globalDir())
+    const controller = new AbortController()
+    const pending = p.recentNotes(undefined, globalDir(), controller.signal)
+    controller.abort(new Error('stop'))
+    await expect(pending).rejects.toThrow('stop')
+    await p.dispose()
+  })
+
+  it('appends journal entries in Obsidian format and indexes them', async () => {
+    const p = provider(false)
+    const appended = await p.appendJournal({
+      scope: 'global',
+      date: '2026-08-18',
+      title: 'Fork sync',
+      body: '- Merged upstream.\n- Touched: [[My note]]',
+    }, globalDir())
+    expect(appended).toEqual({ path: 'journal/2026-08-18.md', date: '2026-08-18' })
+    const file = await readFile(join(globalDir(), appended.path), 'utf8')
+    expect(file.startsWith('---\ntype: journal\ndate: 2026-08-18\n---\n')).toBe(true)
+    expect(file).toContain('## Fork sync\n- Merged upstream.')
+    const hits = await p.search('upstream', undefined, [globalDir()])
+    expect(hits[0]?.title).toBe('2026-08-18')
+    await p.dispose()
+  })
+
+  it('appends into the same day file and defaults to the UTC day', async () => {
+    const p = provider(false)
+    await p.appendJournal({ scope: 'global', title: 'First', body: '- a' }, globalDir())
+    const path = `journal/${new Date().toISOString().slice(0, 10)}.md`
+    const first = await readFile(join(globalDir(), path), 'utf8')
+    await p.appendJournal({ scope: 'global', title: 'Second', body: '- b' }, globalDir())
+    const second = await readFile(join(globalDir(), path), 'utf8')
+    expect(first).toContain('## First')
+    expect(second).toContain('## First')
+    expect(second).toContain('## Second')
+    expect(second.length).toBeGreaterThan(first.length)
+    await p.dispose()
+  })
+
+  it('serializes concurrent appends to one day file on the exclusive chain', async () => {
+    const p = provider(false)
+    await Promise.all([
+      p.appendJournal({ scope: 'global', date: '2026-08-18', title: 'A', body: '- a' }, globalDir()),
+      p.appendJournal({ scope: 'global', date: '2026-08-18', title: 'B', body: '- b' }, globalDir()),
+    ])
+    const text = await readFile(join(globalDir(), 'journal', '2026-08-18.md'), 'utf8')
+    expect(text).toContain('## A\n- a')
+    expect(text).toContain('## B\n- b')
+    expect(text.indexOf('type: journal', text.indexOf('type: journal') + 1)).toBe(-1)
+    await p.dispose()
+  })
+
+  it('validates journal dates, titles, and bodies loudly', async () => {
+    const p = provider(false)
+    await expect(p.appendJournal({ scope: 'global', date: '2026-2-3', title: 'T', body: '- b' }, globalDir())).rejects.toThrow('YYYY-MM-DD')
+    await expect(p.appendJournal({ scope: 'global', date: '2026-02-30', title: 'T', body: '- b' }, globalDir())).rejects.toThrow('not a real calendar day')
+    await expect(p.appendJournal({ scope: 'global', title: '', body: '- b' }, globalDir())).rejects.toThrow('single non-empty line')
+    await expect(p.appendJournal({ scope: 'global', title: 'multi\nline', body: '- b' }, globalDir())).rejects.toThrow('single non-empty line')
+    await expect(p.appendJournal({ scope: 'global', title: 'T', body: '   ' }, globalDir())).rejects.toThrow('body must not be empty')
+    await p.dispose()
+  })
+
+  it('rejects an aborted journal append before touching disk', async () => {
+    const p = provider(false)
+    const controller = new AbortController()
+    controller.abort(new Error('stop'))
+    await expect(p.appendJournal({ scope: 'global', title: 'T', body: '- b' }, globalDir(), controller.signal)).rejects.toThrow('stop')
+    await p.dispose()
+  })
+
+  it('fails loudly when the journal path exists as a directory', async () => {
+    const p = provider(false)
+    await mkdir(join(globalDir(), 'journal', '2026-08-18.md'), { recursive: true })
+    await expect(p.appendJournal({ scope: 'global', date: '2026-08-18', title: 'T', body: '- b' }, globalDir())).rejects.toThrow()
+    await p.dispose()
+  })
+
+  it('reports watcher batches with vault-relative paths to the change consumer', async () => {
+    const { impl, handles } = fakeWatch()
+    const onChange = vi.fn()
+    const p = new LocalMemoryProvider(resolveConfig({ watch: true, debounceMs: 5 }), impl, undefined, onChange)
+    const written = await p.write(input(), globalDir())
+    const path = join(globalDir(), written.path)
+    await writeFile(path, await readFile(path, 'utf8').then(text => text.replace('vitest', 'jest')), 'utf8')
+    handles[0]!.emit('all', 'change', path)
+    await vi.waitFor(() => { expect(onChange).toHaveBeenCalledWith(globalDir(), [written.path]) }, { timeout: 5000 })
+    await p.dispose()
+  })
+
+  it('tolerates unlink batches for files without index rows', async () => {
+    const { impl, handles } = fakeWatch()
+    const p = new LocalMemoryProvider(resolveConfig({ watch: true, debounceMs: 5 }), impl)
+    await p.write(input(), globalDir())
+    handles[0]!.emit('all', 'unlink', join(globalDir(), 'notes', 'ghost.md'))
+    await new Promise(resolve => setTimeout(resolve, 15))
+    expect((await p.read('My note', [globalDir()])).title).toBe('My note')
+    await p.dispose()
+  })
+})
+
 describe('apply and config', () => {
   it('registers into the memory service and unregisters on plugin fiber disposal', async () => {
     const ctx = new Context()
@@ -404,6 +569,24 @@ describe('apply and config', () => {
     silentWarn()
     await p.dispose()
   })
+
+  it('emits memory/change for watcher-observed vault edits', async () => {
+    const ctx = new Context()
+    await ctx.plugin(MemoryService, { dir: globalDir() })
+    const changes: Array<{ dir: string; paths: string[] }> = []
+    ctx.on('memory/change', (payload) => { changes.push(payload) })
+    const fiber = ctx.plugin({ name, inject, apply }, { watch: true, debounceMs: 5 })
+    await fiber
+    // The first write opens the vault, so it races the watcher's startup scan;
+    // the ready pass (empty batch) marks the watcher live. A later write is
+    // observed directly.
+    await ctx.memory.write(input(), undefined)
+    await vi.waitFor(() => { expect(changes.some(change => change.paths.length === 0)).toBe(true) }, { timeout: 10_000 })
+    await ctx.memory.write(input({ title: 'Watched' }), undefined)
+    await vi.waitFor(() => { expect(changes.some(change => change.paths.includes('notes/watched.md'))).toBe(true) }, { timeout: 10_000 })
+    await fiber.dispose()
+    await ctx.fiber.dispose()
+  }, 15_000)
 })
 
 describe('extractWikiLinks', () => {

@@ -928,6 +928,30 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         parameters: [{ name: 'ref', description: 'start note id or exact title.' }, { name: 'opts', description: 'optional depth (1-2) and link-kind filter.' }, { name: 'cwd', description: 'caller session working directory.' }, { name: 'signal', description: 'caller cancellation.' }],
         returns: 'the start note and its adjacency nodes.',
       },
+      {
+        signature: 'async readInScope( ref: string, scope: MemoryScope, cwd: string | undefined, signal?: AbortSignal, ): Promise<MemoryNote>',
+        description: 'Read one note by id or exact title within one explicit scope, skipping the chain. Used by consumers that must merge into or read from a specific vault regardless of same-title notes elsewhere.',
+        parameters: [{ name: 'ref', description: 'note id or exact title.' }, { name: 'scope', description: 'the single vault to resolve within.' }, { name: 'cwd', description: 'caller session working directory.' }, { name: 'signal', description: 'caller cancellation.' }],
+        returns: 'the resolved note with both link directions.',
+      },
+      {
+        signature: 'async readPersona(scope: MemoryScope, cwd: string | undefined, signal?: AbortSignal): Promise<MemoryPersona | undefined>',
+        description: 'Read one vault\'s persona note (`MEMORY.md`) whole. `scope: \'project\'` requires the caller\'s cwd to resolve to a registered workspace.',
+        parameters: [{ name: 'scope', description: 'which vault\'s persona note to read.' }, { name: 'cwd', description: 'caller session working directory.' }, { name: 'signal', description: 'caller cancellation.' }],
+        returns: 'the persona note, or `undefined` when the vault has no `MEMORY.md`.',
+      },
+      {
+        signature: 'async recent( opts: MemoryRecentOptions | undefined, cwd: string | undefined, signal?: AbortSignal, ): Promise<{ dir: string; notes: MemoryRecentNote[] }>',
+        description: 'The project vault\'s most recently updated topic notes, newest first. Requires the caller\'s cwd to resolve to a registered workspace; callers that tolerate global-only sessions check `resolveScopes` first.',
+        parameters: [{ name: 'opts', description: 'optional window size, bounded by provider defaults.' }, { name: 'cwd', description: 'caller session working directory.' }, { name: 'signal', description: 'caller cancellation.' }],
+        returns: 'the vault directory and its recency-window notes.',
+      },
+      {
+        signature: 'async appendJournal( input: MemoryJournalAppendInput, cwd: string | undefined, signal?: AbortSignal, ): Promise<MemoryJournalAppendResult>',
+        description: 'Append one entry to a day\'s journal file. `scope: \'project\'` requires the caller\'s cwd to resolve to a registered workspace. The provider serializes appends on the vault\'s exclusive chain, so concurrent sessions never interleave inside one file.',
+        parameters: [{ name: 'input', description: 'journal scope, optional day, heading, and markdown body.' }, { name: 'cwd', description: 'caller session working directory.' }, { name: 'signal', description: 'caller cancellation.' }],
+        returns: 'the committed journal file reference.',
+      },
     ],
   },
   {
@@ -2447,6 +2471,14 @@ export const EVENT_API: readonly EventApiEntry[] = [
     parameters: [{ name: 'options', description: 'the full request. A LOOP-built request carries the process-local {@link markAgentLoopRequest} identity and arrives deep-frozen (mutation throws): its content is a pure function of the session log (the reconstructability Agent Note), so listeners read it, never rewrite it. Hand-built calls do not carry that marker; their messages already obey the immutable creation contract.' }],
   },
   {
+    name: 'memory/change',
+    mode: 'emit',
+    signature: '\'memory/change\'(payload: { dir: string; paths: string[] }): void',
+    summary: 'The registered provider finished a watcher-driven reconciliation of one vault directory.',
+    description: 'The registered provider finished a watcher-driven reconciliation of one vault directory. Consumers tracking injected context compare the changed files against what they loaded.',
+    parameters: [{ name: 'payload', description: '.paths - changed markdown file paths relative to the vault root.' }],
+  },
+  {
     name: 'session-telemetry/record',
     mode: 'waterfall',
     signature: '\'session-telemetry/record\'(record: SessionTelemetryRecord, next: () => SessionTelemetryRecord): SessionTelemetryRecord',
@@ -3140,7 +3172,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'GenerateOptions',
-    declaration: 'export interface GenerateOptions {\n    provider: string;\n    model: string;\n    reasoningEffort?: ReasoningEffortId;\n    messages: Message[];\n    system?: string;\n    tools?: ToolSchema[];\n    temperature?: number;\n    maxTokens?: number;\n    stop?: string[];\n    signal?: AbortSignal;\n    sessionId?: Branded<\'SessionId\'>;\n    purpose?: \'compaction\' | \'session-title\';\n}',
+    declaration: 'export interface GenerateOptions {\n    provider: string;\n    model: string;\n    reasoningEffort?: ReasoningEffortId;\n    messages: Message[];\n    system?: string;\n    tools?: ToolSchema[];\n    temperature?: number;\n    maxTokens?: number;\n    stop?: string[];\n    signal?: AbortSignal;\n    sessionId?: Branded<\'SessionId\'>;\n    purpose?: \'compaction\' | \'session-title\' | \'memory-distill\';\n}',
   },
   {
     name: 'GenericCallView',
@@ -3411,6 +3443,14 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface ManualCompactAgentContext extends CompactionAgentContext {\n    runMaintenance<T>(task: (signal: AbortSignal) => Promise<T>): Promise<T>;\n}',
   },
   {
+    name: 'MemoryJournalAppendInput',
+    declaration: 'export interface MemoryJournalAppendInput {\n    readonly scope: MemoryScope;\n    readonly date?: string;\n    readonly title: string;\n    readonly body: string;\n}',
+  },
+  {
+    name: 'MemoryJournalAppendResult',
+    declaration: 'export interface MemoryJournalAppendResult {\n    readonly dir: string;\n    readonly path: string;\n    readonly date: string;\n}',
+  },
+  {
     name: 'MemoryLinkKind',
     declaration: 'export type MemoryLinkKind = \'wikilink\' | \'related\';',
   },
@@ -3427,8 +3467,20 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type MemoryNoteId = Branded<\'memory-note\'>;',
   },
   {
+    name: 'MemoryPersona',
+    declaration: 'export interface MemoryPersona {\n    readonly dir: string;\n    readonly path: string;\n    readonly text: string;\n}',
+  },
+  {
     name: 'MemoryProvider',
-    declaration: 'export interface MemoryProvider {\n    write(input: MemoryWriteInput, dir: string, signal?: AbortSignal): Promise<MemoryWriteResult>;\n    read(ref: string, dirs: readonly string[], signal?: AbortSignal): Promise<MemoryNote>;\n    search(query: string, opts: MemorySearchOptions | undefined, dirs: readonly string[], signal?: AbortSignal): Promise<MemorySearchHit[]>;\n    traverse(ref: string, opts: MemoryTraverseOptions | undefined, dirs: readonly string[], signal?: AbortSignal): Promise<MemoryTraversal>;\n}',
+    declaration: 'export interface MemoryProvider {\n    write(input: MemoryWriteInput, dir: string, signal?: AbortSignal): Promise<MemoryWriteResult>;\n    read(ref: string, dirs: readonly string[], signal?: AbortSignal): Promise<MemoryNote>;\n    search(query: string, opts: MemorySearchOptions | undefined, dirs: readonly string[], signal?: AbortSignal): Promise<MemorySearchHit[]>;\n    traverse(ref: string, opts: MemoryTraverseOptions | undefined, dirs: readonly string[], signal?: AbortSignal): Promise<MemoryTraversal>;\n    readPersona(dir: string, signal?: AbortSignal): Promise<{\n        path: string;\n        text: string;\n    } | undefined>;\n    recentNotes(opts: MemoryRecentOptions | undefined, dir: string, signal?: AbortSignal): Promise<MemoryRecentNote[]>;\n    appendJournal(input: MemoryJournalAppendInput, dir: string, signal?: AbortSignal): Promise<{\n        path: string;\n        date: string;\n    }>;\n}',
+  },
+  {
+    name: 'MemoryRecentNote',
+    declaration: 'export interface MemoryRecentNote {\n    readonly path: string;\n    readonly title: string;\n    readonly body: string;\n    readonly updated: number;\n}',
+  },
+  {
+    name: 'MemoryRecentOptions',
+    declaration: 'export interface MemoryRecentOptions {\n    readonly limit?: number;\n}',
   },
   {
     name: 'MemoryScope',

@@ -28,7 +28,7 @@ function agentWithCwd(cwd: string | undefined): Agent {
   return { id: SessionId('tool-parent'), session } as unknown as Agent
 }
 
-type ProviderSpies = Pick<MemoryProvider, 'write' | 'read' | 'search' | 'traverse'>
+type ProviderSpies = Pick<MemoryProvider, 'write' | 'read' | 'search' | 'traverse' | 'readPersona' | 'recentNotes' | 'appendJournal'>
 
 function fakeProvider(): ProviderSpies & { provider: MemoryProvider } {
   const note: MemoryNote = {
@@ -58,7 +58,13 @@ function fakeProvider(): ProviderSpies & { provider: MemoryProvider } {
   const read = vi.fn(async () => note)
   const search = vi.fn(async () => [{ id: MemoryNoteId('n1'), scope: 'project' as const, title: 'A note', snippet: 'body', tags: ['t'] }])
   const traverse = vi.fn(async () => traversal)
-  return { provider: { write, read, search, traverse }, write, read, search, traverse }
+  const readPersona = vi.fn(async () => ({ path: 'MEMORY.md', text: 'persona' }))
+  const recentNotes = vi.fn(async () => [])
+  const appendJournal = vi.fn(async () => ({ path: 'journal/2026-08-18.md', date: '2026-08-18' }))
+  return {
+    provider: { write, read, search, traverse, readPersona, recentNotes, appendJournal },
+    write, read, search, traverse, readPersona, recentNotes, appendJournal,
+  }
 }
 
 function selectiveRegistry(registered: string): { resolveByPath: ReturnType<typeof vi.fn> } {

@@ -23,7 +23,7 @@ function selectiveRegistry(registered: string): FakeRegistry {
     : Promise.reject(new Error(`no workspace for ${path}`))) }
 }
 
-type ProviderSpies = Pick<MemoryProvider, 'write' | 'read' | 'search' | 'traverse'>
+type ProviderSpies = Pick<MemoryProvider, 'write' | 'read' | 'search' | 'traverse' | 'readPersona' | 'recentNotes' | 'appendJournal'>
 
 function fakeProvider(overrides: Partial<MemoryProvider> = {}): ProviderSpies & { provider: MemoryProvider } {
   const note: MemoryNote = {
@@ -49,7 +49,13 @@ function fakeProvider(overrides: Partial<MemoryProvider> = {}): ProviderSpies & 
   const read = overrides.read ?? vi.fn(async () => note)
   const search = overrides.search ?? vi.fn(async () => [])
   const traverse = overrides.traverse ?? vi.fn(async () => traversal)
-  return { provider: { write, read, search, traverse }, write, read, search, traverse }
+  const readPersona = overrides.readPersona ?? vi.fn(async () => ({ path: 'MEMORY.md', text: 'persona' }))
+  const recentNotes = overrides.recentNotes ?? vi.fn(async () => [{ path: 'notes/recent.md', title: 'Recent', body: 'b', updated: 1 }])
+  const appendJournal = overrides.appendJournal ?? vi.fn(async () => ({ path: 'journal/2026-08-18.md', date: '2026-08-18' }))
+  return {
+    provider: { write, read, search, traverse, readPersona, recentNotes, appendJournal },
+    write, read, search, traverse, readPersona, recentNotes, appendJournal,
+  }
 }
 
 async function mounted(config: { dir?: string; dshHome?: string } = { dshHome: HOME }) {
@@ -82,10 +88,15 @@ describe('MemoryService', () => {
 
   it('fails every operation loudly without a registered provider', async () => {
     const ctx = await mounted()
+    ctx.provide('workspaceRegistry', fakeRegistry(true))
     await expect(ctx.memory.write({ scope: 'global', title: 't', content: 'c' }, undefined)).rejects.toThrow('no memory provider is registered')
     await expect(ctx.memory.read('n1', undefined)).rejects.toMatchObject({ code: 'NO_PROVIDER' })
     await expect(ctx.memory.search('q', undefined, undefined)).rejects.toBeInstanceOf(MemoryError)
     await expect(ctx.memory.traverse('n1', undefined, undefined)).rejects.toMatchObject({ code: 'NO_PROVIDER' })
+    await expect(ctx.memory.readInScope('n1', 'global', undefined)).rejects.toMatchObject({ code: 'NO_PROVIDER' })
+    await expect(ctx.memory.readPersona('global', undefined)).rejects.toMatchObject({ code: 'NO_PROVIDER' })
+    await expect(ctx.memory.recent(undefined, join(HOME, 'work', 'proj'))).rejects.toMatchObject({ code: 'NO_PROVIDER' })
+    await expect(ctx.memory.appendJournal({ scope: 'global', title: 't', body: 'b' }, undefined)).rejects.toMatchObject({ code: 'NO_PROVIDER' })
     await ctx.fiber.dispose()
   })
 
@@ -237,6 +248,68 @@ describe('MemoryService', () => {
     ctx.memory.register(provider)
     await ctx.memory.read('n1', undefined)
     expect(read).toHaveBeenCalledWith('n1', [join(HOME, 'custom-vault')], undefined)
+    await ctx.fiber.dispose()
+  })
+
+  it('resolves readInScope within the exact vault only', async () => {
+    const ctx = await mounted()
+    const cwd = join(HOME, 'work', 'proj')
+    ctx.provide('workspaceRegistry', selectiveRegistry(cwd))
+    const { provider, read } = fakeProvider()
+    ctx.memory.register(provider)
+    await ctx.memory.readInScope('n1', 'global', cwd)
+    expect(read).toHaveBeenCalledWith('n1', [join(HOME, 'memory')], undefined)
+    await ctx.memory.readInScope('n1', 'project', cwd)
+    expect(read).toHaveBeenLastCalledWith('n1', [join(cwd, PROJECT_MEMORY_DIR)], undefined)
+    await expect(ctx.memory.readInScope('n1', 'project', undefined)).rejects.toMatchObject({ code: 'NO_PROJECT_SCOPE' })
+    await ctx.fiber.dispose()
+  })
+
+  it('routes persona reads, recency windows, and journal appends by scope', async () => {
+    const ctx = await mounted()
+    const cwd = join(HOME, 'work', 'proj')
+    ctx.provide('workspaceRegistry', selectiveRegistry(cwd))
+    const { provider, readPersona, recentNotes, appendJournal } = fakeProvider()
+    ctx.memory.register(provider)
+
+    const persona = await ctx.memory.readPersona('global', undefined)
+    expect(persona).toEqual({ dir: join(HOME, 'memory'), path: 'MEMORY.md', text: 'persona' })
+    expect(readPersona).toHaveBeenCalledWith(join(HOME, 'memory'), undefined)
+
+    await expect(ctx.memory.readPersona('project', undefined)).rejects.toMatchObject({ code: 'NO_PROJECT_SCOPE' })
+    await ctx.memory.readPersona('project', cwd)
+    expect(readPersona).toHaveBeenLastCalledWith(join(cwd, PROJECT_MEMORY_DIR), undefined)
+
+    const recent = await ctx.memory.recent({ limit: 5 }, cwd)
+    expect(recent).toEqual({ dir: join(cwd, PROJECT_MEMORY_DIR), notes: [{ path: 'notes/recent.md', title: 'Recent', body: 'b', updated: 1 }] })
+    expect(recentNotes).toHaveBeenCalledWith({ limit: 5 }, join(cwd, PROJECT_MEMORY_DIR), undefined)
+    await expect(ctx.memory.recent(undefined, undefined)).rejects.toMatchObject({ code: 'NO_PROJECT_SCOPE' })
+
+    const journal = await ctx.memory.appendJournal({ scope: 'project', date: '2026-08-18', title: 'T', body: '- b' }, cwd)
+    expect(journal).toEqual({ dir: join(cwd, PROJECT_MEMORY_DIR), path: 'journal/2026-08-18.md', date: '2026-08-18' })
+    expect(appendJournal).toHaveBeenCalledWith({ scope: 'project', date: '2026-08-18', title: 'T', body: '- b' }, join(cwd, PROJECT_MEMORY_DIR), undefined)
+
+    await ctx.memory.appendJournal({ scope: 'global', title: 'G', body: '- b' }, undefined)
+    expect(appendJournal).toHaveBeenLastCalledWith({ scope: 'global', title: 'G', body: '- b' }, join(HOME, 'memory'), undefined)
+    await ctx.fiber.dispose()
+  })
+
+  it('returns no persona when the vault has no MEMORY.md', async () => {
+    const ctx = await mounted()
+    const { provider } = fakeProvider({ readPersona: vi.fn(async () => undefined) })
+    ctx.memory.register(provider)
+    await expect(ctx.memory.readPersona('global', undefined)).resolves.toBeUndefined()
+    await ctx.fiber.dispose()
+  })
+
+  it('passes an aborted journal signal through without touching the provider', async () => {
+    const ctx = await mounted()
+    const { provider, appendJournal } = fakeProvider()
+    ctx.memory.register(provider)
+    const controller = new AbortController()
+    controller.abort(new Error('caller aborted'))
+    await expect(ctx.memory.appendJournal({ scope: 'global', title: 't', body: 'b' }, undefined, controller.signal)).rejects.toThrow('caller aborted')
+    expect(appendJournal).not.toHaveBeenCalled()
     await ctx.fiber.dispose()
   })
 })

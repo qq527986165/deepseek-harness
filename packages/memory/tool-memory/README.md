@@ -59,5 +59,5 @@ Results are tool-call-local; no prefix impact beyond the logged turn.
 ## Known Limitations and Deferred Work
 
 - **No `memory_delete` tool** — deletion is a Phase 3 lifecycle decision (review, TTL, link repair); users can still edit or remove vault files directly.
-- **No automatic recall injection** — the tools are the only model-visible surface in Phase 1; session-start injection, per-turn distillation, and the guidance section arrive in Phase 2.
+- **Explicit writes only** — the tools are the explicit recall surface; automatic recall injection, per-turn distillation, and the guidance section live in the separate `dsh-memory-lifecycle` consumer.
 - **Exact-title lookups** — `memory_read`/`memory_traverse` resolve by id or exact title; fuzzy title matching is deferred to the Phase 4 retrieval provider.

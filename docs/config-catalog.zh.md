@@ -1293,7 +1293,37 @@ export interface Config {
 }
 ```
 
-来源：[`packages/memory/memory/src/index.ts:66`](../packages/memory/memory/src/index.ts)
+来源：[`packages/memory/memory/src/index.ts:88`](../packages/memory/memory/src/index.ts)
+
+<a id="deepseek-aidsh-memory-lifecycle"></a>
+
+## `@deepseek-ai/dsh-memory-lifecycle`
+
+需要：`memory` · `llm` · `systemPrompt`
+
+```ts config-catalog
+/** Deployment-owned cost and noise controls for the automatic memory lifecycle. */
+export interface Config {
+  /** Whether finished turns are distilled at all. Defaults to true. */
+  distill?: boolean
+  /** Minimum non-whitespace characters across a finished turn's text to distill. Defaults to 40. */
+  minTurnChars?: number
+  /** Auxiliary distillation output-token cap. Defaults to 1024. */
+  maxDistillTokens?: number
+  /** End-to-end auxiliary distillation deadline in milliseconds. Defaults to 30000. */
+  distillTimeoutMs?: number
+  /** Optional explicit auxiliary route; must be paired with `model`. */
+  provider?: string
+  /** Optional explicit auxiliary model; must be paired with `provider`. */
+  model?: string
+  /** Maximum UTF-8 bytes of the complete session-start injected context. Defaults to 16384. */
+  maxInjectBytes?: number
+  /** Project topic notes loaded into the injected context, newest first. Defaults to 10. */
+  recentNoteCount?: number
+}
+```
+
+来源：[`packages/memory/memory-lifecycle/src/config.ts:10`](../packages/memory/memory-lifecycle/src/config.ts)
 
 <a id="deepseek-aidsh-memory-local"></a>
 
@@ -1315,7 +1345,7 @@ export interface Config {
 }
 ```
 
-来源：[`packages/memory/memory-local/src/index.ts:52`](../packages/memory/memory-local/src/index.ts)
+来源：[`packages/memory/memory-local/src/index.ts:55`](../packages/memory/memory-local/src/index.ts)
 
 <a id="deepseek-aidsh-message-feedback"></a>
 

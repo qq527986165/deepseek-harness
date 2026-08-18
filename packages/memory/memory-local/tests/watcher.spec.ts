@@ -46,7 +46,7 @@ function harness() {
 const tick = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
 describe('VaultWatcher', () => {
-  it('watches with ignoreInitial and a filtering ignored predicate', async () => {
+  it('watches with ignoreInitial and an ignored predicate for the index and .obsidian', async () => {
     const { handles, watcher, watchImpl } = harness()
     watcher.start()
     expect(watchImpl).toHaveBeenCalledWith(DIR, expect.objectContaining({ ignoreInitial: true }))
@@ -54,11 +54,24 @@ describe('VaultWatcher', () => {
     expect(ignored(join(DIR, '.memory-index.sqlite'))).toBe(true)
     expect(ignored(join(DIR, '.obsidian', 'workspace.json'))).toBe(true)
     expect(ignored(join(DIR, '.obsidian'))).toBe(true)
-    expect(ignored(join(DIR, 'notes', 'a.txt'))).toBe(true)
     expect(ignored(join(DIR, 'notes', 'a.md'))).toBe(false)
+    expect(ignored(join(DIR, 'notes'))).toBe(false)
     expect(ignored(join(DIR, 'MEMORY.md'))).toBe(false)
     await watcher.dispose()
     expect(handles[0]!.closed).toBe(true)
+  })
+
+  it('filters directory events and non-markdown files out of batches', async () => {
+    const { handles, changes, watcher } = harness()
+    watcher.start()
+    handles[0]!.emit('all', 'addDir', join(DIR, 'notes'))
+    handles[0]!.emit('all', 'unlinkDir', join(DIR, 'notes'))
+    handles[0]!.emit('all', 'add', join(DIR, 'notes', 'a.txt'))
+    handles[0]!.emit('all', 'change', join(DIR, 'a.md'))
+    await tick(10)
+    expect(changes).toHaveBeenCalledTimes(1)
+    expect(changes).toHaveBeenCalledWith([join(DIR, 'a.md')])
+    await watcher.dispose()
   })
 
   it('debounces changes into one batch and runs the ready-time full pass', async () => {
