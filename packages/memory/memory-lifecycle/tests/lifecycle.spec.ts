@@ -549,7 +549,7 @@ describe('memory-lifecycle settings and review command', () => {
     session.append('request/header', { header: { config: { provider: 'deepseek', model: 'main-model' } }, reason: 'initial' })
     const agent = fakeAgent(ctx, session)
 
-    const execution = await ctx.commands.execute(agent, '/memory-review', new AbortController().signal)
+    const execution = await ctx.commands.execute(agent, '/memory-review', [], new AbortController().signal)
     expect(execution?.result).toMatchObject({ kind: 'success' })
 
     const review = session.events.findLast(event => event.type === 'memory/review')
@@ -563,14 +563,14 @@ describe('memory-lifecycle settings and review command', () => {
   it('rejects arguments and global-only sessions with clear error text', async () => {
     const argsCtx = await reviewHarness()
     const argsAgent = fakeAgent(argsCtx.ctx, createSession('review-args', 'C:/work/proj'))
-    const withArgs = await argsCtx.ctx.commands.execute(argsAgent, '/memory-review extra', new AbortController().signal)
+    const withArgs = await argsCtx.ctx.commands.execute(argsAgent, '/memory-review extra', [], new AbortController().signal)
     expect(withArgs?.result).toEqual({ kind: 'error', text: 'The /memory-review command takes no arguments.' })
     expect(argsCtx.llm.stream).not.toHaveBeenCalled()
     await argsCtx.ctx.fiber.dispose()
 
     const globalCtx = await reviewHarness({ resolveScopes: vi.fn(async () => ['global']) })
     const globalAgent = fakeAgent(globalCtx.ctx, createSession('review-global', undefined))
-    const globalOnly = await globalCtx.ctx.commands.execute(globalAgent, '/memory-review', new AbortController().signal)
+    const globalOnly = await globalCtx.ctx.commands.execute(globalAgent, '/memory-review', [], new AbortController().signal)
     expect(globalOnly?.result.kind).toBe('error')
     expect(globalOnly?.result.kind === 'error' && globalOnly.result.text).toContain('needs a project workspace')
     expect(globalCtx.llm.stream).not.toHaveBeenCalled()
@@ -583,7 +583,7 @@ describe('memory-lifecycle settings and review command', () => {
     session.append('request/header', { header: { config: { provider: 'deepseek', model: 'main-model' } }, reason: 'initial' })
     const agent = fakeAgent(ctx, session)
 
-    const execution = await ctx.commands.execute(agent, '/memory-review', new AbortController().signal)
+    const execution = await ctx.commands.execute(agent, '/memory-review', [], new AbortController().signal)
     expect(execution?.result.kind).toBe('error')
     expect(execution?.result.kind === 'error' && execution.result.text).toContain('unknown note id')
     expect(session.events.some(event => event.type === 'memory/review')).toBe(false)
@@ -596,7 +596,7 @@ describe('memory-lifecycle settings and review command', () => {
     session.append('request/header', { header: { config: { provider: 'deepseek', model: 'main-model' } }, reason: 'initial' })
     const agent = fakeAgent(ctx, session)
 
-    const execution = await ctx.commands.execute(agent, '/memory-review', new AbortController().signal)
+    const execution = await ctx.commands.execute(agent, '/memory-review', [], new AbortController().signal)
     expect(execution?.result).toEqual({ kind: 'error', text: 'provider exploded' })
     expect(session.events.some(event => event.type === 'memory/review')).toBe(false)
     await ctx.fiber.dispose()
