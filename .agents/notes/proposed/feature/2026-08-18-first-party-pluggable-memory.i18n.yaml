@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/proposed/feature/2026-08-18-first-party-pluggable-memory.md
+2026-08-18-first-party-pluggable-memory.md: e5db009a2717d6ef455c58ceac3a66fcfb35d551
+2026-08-18-first-party-pluggable-memory.zh.md: 5acede5e41383c446f018ee5fbd5a6394f119e36

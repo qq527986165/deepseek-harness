@@ -1,0 +1,26 @@
+/* Memory distill node: tokens only, the shared --dsw-* semantic aliases. */
+
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 0;
+}
+
+.title {
+  margin: 0;
+  font: 600 14px/22px var(--dsw-font-family);
+  color: var(--dsw-alias-label-primary);
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+}

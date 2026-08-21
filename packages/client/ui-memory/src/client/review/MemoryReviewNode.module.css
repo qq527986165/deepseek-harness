@@ -1,0 +1,96 @@
+/* Memory review node: tokens only, the shared --dsw-* semantic aliases. */
+
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 0;
+}
+
+.title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font: 600 14px/22px var(--dsw-font-family);
+  color: var(--dsw-alias-label-primary);
+}
+
+.settledMark {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.empty {
+  margin: 0;
+  font: 400 13px/20px var(--dsw-font-family);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  background: var(--dsw-alias-bg-layer-1);
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 6px;
+}
+
+.cardTitleRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cardTitle {
+  font: 600 13px/20px var(--dsw-font-family);
+  color: var(--dsw-alias-label-primary);
+}
+
+.cardMark {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.cardSnippet {
+  margin: 0;
+  font: 400 13px/20px var(--dsw-font-family);
+  color: var(--dsw-alias-label-secondary);
+}
+
+.cardReason {
+  margin: 0;
+  font: 400 12px/18px var(--dsw-font-family);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.cardActions {
+  display: flex;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.cardOpen {
+  margin-left: auto;
+}
+
+.footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.failure {
+  margin: 0;
+  font: 400 12px/18px var(--dsw-font-family);
+  color: var(--dsw-alias-state-warn-label);
+}

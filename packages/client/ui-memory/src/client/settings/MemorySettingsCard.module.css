@@ -1,0 +1,120 @@
+/* Memory settings card: tokens only, the shared --dsw-* semantic aliases. */
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--dsw-alias-border-inverted);
+  border-radius: 12px;
+  background: var(--dsw-alias-bg-base);
+}
+
+.head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.title {
+  margin: 0;
+  font: 600 15px/22px var(--dsw-font-family);
+  color: var(--dsw-alias-label-primary);
+}
+
+.description {
+  margin: 0;
+  font: 400 13px/20px var(--dsw-font-family);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.toggleRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.toggle {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.fieldHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.fieldLabel {
+  font: 500 13px/20px var(--dsw-font-family);
+  color: var(--dsw-alias-label-primary);
+}
+
+.fieldHint {
+  font: 400 12px/18px var(--dsw-font-family);
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.fieldRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.input {
+  width: 160px;
+  font: 400 14px/22px var(--dsw-font-family);
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-bg-base);
+  border: 1px solid var(--dsw-alias-border-inverted);
+  border-radius: 8px;
+  padding: 6px 10px;
+}
+
+.input[aria-invalid='true'] {
+  border-color: var(--dsw-alias-state-error-primary);
+}
+
+.invalid {
+  font: 400 12px/18px var(--dsw-font-family);
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.saved {
+  font: 400 12px/18px var(--dsw-font-family);
+  color: var(--dsw-alias-state-success-primary);
+}
+
+.overridden {
+  font: 400 11px/16px var(--dsw-font-family);
+  color: var(--dsw-alias-label-tertiary);
+  background: var(--dsw-alias-markdown-tag);
+  border-radius: 4px;
+  padding: 0 6px;
+}
+
+.dir {
+  font: 400 13px/20px var(--dsw-font-family);
+  color: var(--dsw-alias-label-secondary);
+  overflow-wrap: anywhere;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.spacer {
+  flex: 1;
+}

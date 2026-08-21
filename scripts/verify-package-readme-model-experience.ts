@@ -93,6 +93,7 @@ const SENTENCE_MODEL_EXPERIENCE: Readonly<Record<string, SentenceContract>> = {
   'packages/client/ui-settings-general': { kind: 'none', reason: 'Browser-side UI plugin layer; registers nothing model-facing.' },
   'packages/client/ui-settings-models': { kind: 'none', reason: 'Browser-side UI plugin layer; registers nothing model-facing.' },
   'packages/client/ui-settings-plugin-inventory': { kind: 'none', reason: 'Browser-side inventory projection; registers nothing model-facing.' },
+  'packages/client/ui-memory': { kind: 'indirect', reason: 'The panel drives memory Remote reads and writes and the memory-lifecycle settings knobs; the host halves own every model-visible effect (injection content, distillation), and panel mutations append no session events.' },
   'packages/client/locale': { kind: 'none', reason: 'Browser-side UI plugin layer; registers nothing model-facing.' },
   'packages/client/web': { kind: 'none', reason: 'Browser-side UI plugin layer; registers nothing model-facing.' },
   'packages/examples/agent-spine-demo': { kind: 'indirect', reason: 'The bundle only mounts model-facing child plugins.' },
@@ -163,6 +164,9 @@ const SENTENCE_MODEL_EXPERIENCE: Readonly<Record<string, SentenceContract>> = {
   'packages/web/web-fetch-http': { kind: 'indirect', reason: 'The provider backend delegates model rendering to dsh-tool-web.' },
   'packages/web/web-search-exa': { kind: 'indirect', reason: 'The provider backend delegates model rendering to dsh-tool-web.' },
   'packages/workflow/workflow': { kind: 'indirect', reason: 'The service delegates parent and child model rendering to its consumer and engine.' },
+  'packages/memory/memory': { kind: 'indirect', reason: 'The sole-provider seam registers no tools and injects no prompt text; dsh-tool-memory owns all model rendering.' },
+  'packages/memory/memory-local': { kind: 'indirect', reason: 'The file-first provider registers no tools and injects no prompt text; dsh-tool-memory owns all model rendering.' },
+  'packages/memory/memory-remote': { kind: 'indirect', reason: 'The web transport registers no tools and injects no prompt text; its only model-visible effect is the memory/review-decided event chat nodes render.' },
 }
 
 interface Failure {

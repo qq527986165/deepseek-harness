@@ -1,7 +1,7 @@
 // FixtureApi: standalone UI development without a server. Real contract shape: unary takes
 // RpcRequest<P> and returns RpcResponse<T> (echoing the rpcId); streams yield RpcRequest<frame>
 // (the fixture IS the fake server, so it mints frame rpcIds); root respond takes ClientResponse
-// and returns RpcReceipt. fx-alpha carries a hand-built history script (74 turns, pageable);
+// and returns RpcReceipt. fx-alpha carries a hand-built history script (77 turns, pageable);
 // prompt triggers a chunked streaming replay; cancel stops the replay; resident pending
 // approval/question requests exercise replay and composer takeover with stable rpcIds.
 
@@ -489,7 +489,7 @@ function buildAlphaLog(): SessionEvent[] {
     push({ type: 'step/end', data: { turn, step: 0 } })
     push({ type: 'turn/end', data: { turn, reason: { kind: 'completed' } } })
   }
-  // Turn 74: todo_write sample — the TodoRow toolview in the flow plus the
+  // Turn 76: todo_write sample — the TodoRow toolview in the flow plus the
   // todo/write snapshot event feeding the TodoPanel plan strip. Two items are
   // in_progress: this fixture chooses the parallel policy, so both surfaces
   // must render a parallel plan rather than the first active item alone.
@@ -587,8 +587,71 @@ function buildAlphaLog(): SessionEvent[] {
   push({ type: 'step/end', data: { turn: 73, step: 0 } })
   push({ type: 'turn/end', data: { turn: 73, reason: { kind: 'completed' } } })
 
+  // Turn 74: the memory-distill sample — one committed turn's log-only receipt
+  // in a real turn/step. The distill Conversation Node renders only its real
+  // global and project topic-node chips.
+  {
+    const turn = 74
+    push({ type: 'turn/start', data: { turn } })
+    push({ type: 'user/message', surfaceOp: 'append', data: userMessage(text('Remember this for later.')) })
+    push({ type: 'step/start', data: { turn, step: 0 } })
+    push({
+      type: 'memory/distill',
+      data: {
+        turn,
+        notes: [
+          {
+            id: 'n1', scope: 'global', title: 'Coffee preference', path: 'notes/coffee-preference-a1b2c3d4.md',
+            journalAnchor: '^memory-a1b2c3d4-global',
+          },
+          {
+            id: 'p2', scope: 'project', title: 'Project convention', path: 'notes/project-convention-d4e5f6a7.md',
+            journalAnchor: '^memory-d4e5f6a7-project',
+          },
+        ],
+        journals: [
+          {
+            scope: 'global', path: 'journal/2026-08-19.md', date: '2026-08-19', title: '2026-08-19',
+            anchor: '^memory-a1b2c3d4-global',
+          },
+          {
+            scope: 'project', path: 'journal/2026-08-19.md', date: '2026-08-19', title: '2026-08-19',
+            anchor: '^memory-d4e5f6a7-project',
+          },
+        ],
+        model: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+      },
+    })
+    push({ type: 'step/end', data: { turn, step: 0 } })
+    push({ type: 'turn/end', data: { turn, reason: { kind: 'completed' } } })
+  }
+
+  // Turn 75: the /memory-review sample — the command's log-only proposal event
+  // in a real turn/step, which the review Conversation Node renders as two
+  // candidate cards. The fixture's memoryReview/decide remote settles it on
+  // interaction (promote p1 into the global vault, reject p2).
+  {
+    const turn = 75
+    push({ type: 'turn/start', data: { turn } })
+    push({ type: 'user/message', surfaceOp: 'append', data: userMessage(text('/memory-review')) })
+    push({ type: 'step/start', data: { turn, step: 0 } })
+    push({
+      type: 'memory/review',
+      data: {
+        reviewId: 'fx-review-1',
+        candidates: [
+          { id: 'p1', title: 'Session notes', snippet: 'The user keeps session notes in the project.', reason: 'User-wide workflow preference.' },
+          { id: 'p2', title: 'Project convention', snippet: 'Vitest is the test runner here.', reason: 'Project-specific, not user-wide.' },
+        ],
+        workspaceDir: '/home/fixture/project',
+      },
+    })
+    push({ type: 'step/end', data: { turn, step: 0 } })
+    push({ type: 'turn/end', data: { turn, reason: { kind: 'completed' } } })
+  }
+
   const todoArgs = JSON.stringify({ todos: fixtureTodos })
-  toolTurn(74, 'todo_write', todoArgs, 'Updated todo list: 1 pending, 2 in progress, 1 completed.')
+  toolTurn(76, 'todo_write', todoArgs, 'Updated todo list: 1 pending, 2 in progress, 1 completed.')
   // The real tool appends the snapshot mid-execution — between tool/call and
   // tool/result — so the fixture reproduces that exact ordering (the last
   // toolTurn events run ... tool/call, tool/result, step/end, turn/end).
@@ -1722,6 +1785,227 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
       ? { ok: false, error: { code: 'session-not-found', message: `no session ${id}`, details: { sessionId: id } } }
       : undefined
   )
+
+  /** One fixture memory note (the panel's read view vocabulary). */
+  type FxMemoryNote = {
+    id: string
+    scope: 'global' | 'project'
+    title: string
+    path: string
+    tags: string[]
+    body: string
+    updated: number
+    related: Array<{ title: string; id?: string }>
+    backlinks: Array<{ title: string; id?: string }>
+  }
+
+  /** One fixture memory list row. */
+  type FxMemoryRow = {
+    id: string
+    path: string
+    title: string
+    tags: string[]
+    updated: number
+    excerpt: string
+    persona: boolean
+  }
+
+  /** The fixture memory Remote's request and result vocabulary. */
+  type FxMemoryListRequest = { scope?: string; workspaceDir?: string; limit?: number }
+  type FxMemoryReadRequest = { ref?: string; scope?: string; workspaceDir?: string }
+  type FxMemorySearchRequest = { query?: string; scope?: string; workspaceDir?: string; limit?: number }
+  type FxMemoryWriteRequest = {
+    id?: string
+    scope?: string
+    title?: string
+    content?: string
+    tags?: string[]
+    workspaceDir?: string
+  }
+  type FxMemoryDeleteRequest = { ref?: string; scope?: string; workspaceDir?: string }
+  type FxMemoryListResult = { dir: string; scope: string; notes: FxMemoryRow[] }
+  type FxMemoryHit = { id: string; scope: string; title: string; snippet: string; tags: string[] }
+  type FxMemoryWriteResult = {
+    id: string
+    scope: string
+    title: string
+    path: string
+    created: string
+    updated: string
+  }
+  type FxMemoryDeleteResult = { id: string; scope: string; title: string; path: string; trashPath?: string }
+
+  /** The settle's inner business result (the generated MemoryReviewDecideResult shape). */
+  type FxReviewDecideValue =
+    | {
+      ok: true
+      value: { reviewId: string; accepted: Array<{ id: string; title: string; globalId: string }>; rejected: string[] }
+    }
+    | { ok: false; error: { code: string; reviewId: string; id?: string; ids?: string[] } }
+
+  /** Canonical fixture implementation of the generated memory Remote contract. */
+  const fixtureMemory = {
+    FIXTURE_GLOBAL_DIR: '/home/fixture/memory',
+    NOTES: [
+      {
+        id: 'persona', scope: 'global', title: 'About the user', path: 'MEMORY.md', tags: [],
+        body: 'The user is a backend engineer.', updated: Date.now(),
+        related: [], backlinks: [{ title: 'Coffee preference', id: 'n1' }],
+      },
+      {
+        id: 'n1', scope: 'global', title: 'Coffee preference', path: 'notes/coffee-preference-a1b2c3d4.md', tags: ['identity', 'preference'],
+        body: 'Prefers pour-over coffee.\n\nSee [[Coffee gear]].', updated: Date.now(),
+        related: [{ title: 'Coffee gear', id: 'n2' }], backlinks: [{ title: 'Coffee gear', id: 'n2' }],
+      },
+      {
+        id: 'n2', scope: 'global', title: 'Coffee gear', path: 'notes/coffee-gear.md', tags: [],
+        body: 'Owns a hand grinder and a V60.', updated: Date.now(),
+        related: [], backlinks: [],
+      },
+    ] as FxMemoryNote[],
+    /** One adopted journal used by the panel's read-only coverage (kept out of the list). */
+    JOURNAL: {
+      id: 'adopted:journal/2026-08-19.md', scope: 'global', title: '2026-08-19', path: 'journal/2026-08-19.md', tags: [],
+      body: '## 2026-08-19\n\nRemembered the pour-over preference.', updated: Date.now(),
+      related: [], backlinks: [],
+    } as FxMemoryNote,
+    info(): RpcResult<{ globalDir: string }> {
+      return { ok: true, value: { globalDir: fixtureMemory.FIXTURE_GLOBAL_DIR } }
+    },
+    list(request: FxMemoryListRequest): RpcResult<FxMemoryListResult> {
+      const scope = request.scope ?? 'global'
+      const rows: FxMemoryRow[] = fixtureMemory.NOTES.map(note => ({
+        id: note.id,
+        path: note.path,
+        title: note.title,
+        tags: note.tags,
+        updated: note.updated,
+        excerpt: note.body.split('\n')[0] ?? '',
+        persona: note.path === 'MEMORY.md',
+      }))
+      return {
+        ok: true,
+        value: { dir: scope === 'project' ? `${request.workspaceDir ?? ''}/.dsh/memory` : fixtureMemory.FIXTURE_GLOBAL_DIR, scope, notes: rows },
+      }
+    },
+    read(request: FxMemoryReadRequest): RpcResult<FxMemoryNote> {
+      const ref = request.ref ?? ''
+      if (request.scope === 'project') {
+        if (request.workspaceDir === undefined || request.workspaceDir === '') {
+          return {
+            ok: false,
+            error: {
+              code: 'internal',
+              message: 'project-scope write requires a session working directory',
+              details: {},
+            },
+          }
+        }
+        const note = fixtureMemory.PROJECT_NOTES.find(candidate => candidate.id === ref || candidate.title === ref)
+        return note === undefined
+          ? { ok: false, error: { code: 'internal', message: `no memory note matches "${ref}"`, details: {} } }
+          : { ok: true, value: note }
+      }
+      if (ref === fixtureMemory.JOURNAL.id) return { ok: true, value: fixtureMemory.JOURNAL }
+      const note = fixtureMemory.NOTES.find(candidate => candidate.id === ref || candidate.title === ref)
+      return note === undefined
+        ? { ok: false, error: { code: 'internal', message: `no memory note matches "${ref}"`, details: {} } }
+        : { ok: true, value: note }
+    },
+    search(request: FxMemorySearchRequest): RpcResult<FxMemoryHit[]> {
+      const query = request.query ?? ''
+      const hits = fixtureMemory.NOTES
+        .filter(note => note.title.toLowerCase().includes(query.toLowerCase()))
+        .map(note => ({ id: note.id, scope: 'global', title: note.title, snippet: note.body.split('\n')[0] ?? '', tags: note.tags }))
+      return { ok: true, value: hits }
+    },
+    write(request: FxMemoryWriteRequest): RpcResult<FxMemoryWriteResult> {
+      const existing = fixtureMemory.NOTES.find(note => note.id === request.id)
+      if (existing !== undefined) {
+        existing.title = request.title ?? existing.title
+        existing.body = request.content ?? existing.body
+        existing.tags = request.tags ?? []
+        existing.updated = 2
+      }
+      return { ok: true, value: { id: existing?.id ?? 'n1', scope: 'global', title: request.title ?? 'A note', path: existing?.path ?? 'notes/a-note.md', created: 'c', updated: 'u' } }
+    },
+    delete(request: FxMemoryDeleteRequest): RpcResult<FxMemoryDeleteResult> {
+      const ref = request.ref ?? ''
+      const index = fixtureMemory.NOTES.findIndex(candidate => candidate.id === ref || candidate.title === ref)
+      if (index < 0) {
+        return { ok: false, error: { code: 'internal', message: `no memory note matches "${ref}"`, details: {} } }
+      }
+      const [note] = fixtureMemory.NOTES.splice(index, 1)
+      return {
+        ok: true,
+        value: { id: note?.id ?? '', scope: 'global', title: note?.title ?? '', path: note?.path ?? '', trashPath: '/home/fixture/memory-trash/notes/a-note.md' },
+      }
+    },
+    /** The project vault the fixture review promotes out of (separate from the panel's global list). */
+    PROJECT_NOTES: [
+      {
+        id: 'p1', scope: 'project', title: 'Session notes', path: 'notes/session-notes.md', tags: ['workflow'],
+        body: 'The user keeps session notes in the project.', updated: 1, related: [], backlinks: [],
+      },
+      {
+        id: 'p2', scope: 'project', title: 'Project convention', path: 'notes/project-convention-d4e5f6a7.md', tags: [],
+        body: 'Vitest is the test runner here.', updated: 2, related: [], backlinks: [],
+      },
+    ] as FxMemoryNote[],
+    /** The one authored review the assembled lane renders and settles. */
+    FX_REVIEW: {
+      reviewId: 'fx-review-1',
+      workspaceDir: '/home/fixture/project',
+      candidates: [
+        { id: 'p1', title: 'Session notes', snippet: 'The user keeps session notes in the project.', reason: 'User-wide workflow preference.' },
+        { id: 'p2', title: 'Project convention', snippet: 'Vitest is the test runner here.', reason: 'Project-specific, not user-wide.' },
+      ],
+    },
+    /** Mirror of the host settle: validate the exact partition, promote, and land the settlement. */
+    reviewDecide(request: { reviewId?: string; decisions?: { accepted?: string[]; rejected?: string[] } }): RpcResult<FxReviewDecideValue> {
+      const reviewId = request.reviewId ?? ''
+      if (reviewId !== fixtureMemory.FX_REVIEW.reviewId) {
+        return { ok: true, value: { ok: false, error: { code: 'review-not-found', reviewId } } }
+      }
+      const acceptedIds = request.decisions?.accepted ?? []
+      const rejectedIds = request.decisions?.rejected ?? []
+      const candidateIds = new Set(fixtureMemory.FX_REVIEW.candidates.map(candidate => candidate.id))
+      const seen = new Set<string>()
+      for (const id of [...acceptedIds, ...rejectedIds]) {
+        if (seen.has(id)) {
+          return { ok: true, value: { ok: false, error: { code: 'duplicate-candidate', reviewId, id } } }
+        }
+        seen.add(id)
+        if (!candidateIds.has(id)) {
+          return { ok: true, value: { ok: false, error: { code: 'unknown-candidate', reviewId, id } } }
+        }
+      }
+      const undecided = fixtureMemory.FX_REVIEW.candidates.map(candidate => candidate.id).filter(id => !seen.has(id))
+      if (undecided.length > 0) {
+        return { ok: true, value: { ok: false, error: { code: 'undecided-candidates', reviewId, ids: undecided } } }
+      }
+      const accepted: Array<{ id: string; title: string; globalId: string }> = []
+      for (const id of acceptedIds) {
+        const index = fixtureMemory.PROJECT_NOTES.findIndex(note => note.id === id)
+        const note = fixtureMemory.PROJECT_NOTES[index]
+        if (index < 0 || note === undefined) {
+          return { ok: true, value: { ok: false, error: { code: 'note-missing', reviewId, id } } }
+        }
+        const globalId = `g-${note.id}`
+        fixtureMemory.PROJECT_NOTES.splice(index, 1)
+        fixtureMemory.NOTES.push({
+          id: globalId, scope: 'global', title: note.title,
+          path: note.path, tags: note.tags, body: note.body,
+          updated: Date.now(), related: [], backlinks: [],
+        })
+        accepted.push({ id: note.id, title: note.title, globalId })
+      }
+      return {
+        ok: true,
+        value: { ok: true, value: { reviewId: fixtureMemory.FX_REVIEW.reviewId, accepted, rejected: rejectedIds } },
+      }
+    },
+  }
 
   /** Canonical fixture implementation of the generated Commands Remote contract. */
   const commandRemotes = {
@@ -3005,7 +3289,21 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
           agentId: SessionId
           line?: string
           ref?: { id: string; revision: number }
-          request?: { objective?: string; maxGoalRounds?: number }
+          request?: {
+            objective?: string
+            maxGoalRounds?: number
+            scope?: string
+            workspaceDir?: string
+            limit?: number
+            ref?: string
+            query?: string
+            id?: string
+            title?: string
+            content?: string
+            tags?: string[]
+          }
+          reviewId?: string
+          decisions?: { accepted?: string[]; rejected?: string[] }
         }
       }).args
       const sessionId = args.agentId
@@ -3021,6 +3319,25 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
         case 'goals/resume': return Promise.resolve(goalRemotes.resume(sessionId, args.ref as FxGoalRef))
         case 'goals/complete': return Promise.resolve(goalRemotes.complete(sessionId, args.ref as FxGoalRef))
         case 'goals/clear': return Promise.resolve(goalRemotes.clear(sessionId, args.ref as FxGoalRef))
+        case 'memory/info': return Promise.resolve(fixtureMemory.info())
+        case 'memory/list': return Promise.resolve(fixtureMemory.list(args.request ?? { scope: 'global' }))
+        case 'memory/read': return Promise.resolve(fixtureMemory.read(args.request ?? { ref: '' }))
+        case 'memory/search': return Promise.resolve(fixtureMemory.search(args.request ?? { query: '' }))
+        case 'memory/write': return Promise.resolve(fixtureMemory.write(args.request ?? {}))
+        case 'memory/delete': return Promise.resolve(fixtureMemory.delete(args.request ?? { ref: '' }))
+        case 'memoryReview/decide': {
+          const result = fixtureMemory.reviewDecide({
+            ...args.reviewId === undefined ? {} : { reviewId: args.reviewId },
+            ...args.decisions === undefined ? {} : { decisions: args.decisions },
+          })
+          // Host parallel: a committed settle appends memory/review-decided and
+          // the vault mutation reaches the panel through the forwarded change.
+          if (result.ok && result.value.ok) {
+            append(sessionId, { type: 'memory/review-decided', data: result.value.value })
+            emitHost({ type: 'host/remote-event', event: 'memory/change', args: [{ dir: fixtureMemory.FIXTURE_GLOBAL_DIR }] })
+          }
+          return Promise.resolve(result)
+        }
         default:
           return Promise.reject(new Error(`fixture connection RPC endpoint ${JSON.stringify(endpoint)} is unavailable`))
       }

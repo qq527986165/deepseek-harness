@@ -1277,6 +1277,85 @@ export interface ReconnectConfig {
 
 Source: [`packages/mcp/mcp-client/src/index.ts:98`](../packages/mcp/mcp-client/src/index.ts)
 
+<a id="deepseek-aidsh-memory"></a>
+
+## `@deepseek-ai/dsh-memory`
+
+```ts config-catalog
+/** Validated service configuration. */
+export interface Config {
+  /** Global vault directory; defaults to `memory/` under the harness home. */
+  dir?: string
+  /** Harness home used when `dir` is omitted; defaults to `$DSH_HOME` or `~/.dsh`. */
+  dshHome?: string
+}
+```
+
+Source: [`packages/memory/memory/src/index.ts:94`](../packages/memory/memory/src/index.ts)
+
+<a id="deepseek-aidsh-memory-lifecycle"></a>
+
+## `@deepseek-ai/dsh-memory-lifecycle`
+
+Requires: `memory` · `llm` · `systemPrompt`
+
+```ts config-catalog
+/** Deployment- and settings-owned cost and noise controls for the automatic memory lifecycle. */
+export interface Config {
+  /** Whether finished turns are distilled at all. Defaults to true. */
+  distill?: boolean
+  /** Which fixed distillation instruction the auxiliary call uses. Defaults to `concise`. */
+  distillMode?: DistillMode
+  /** Minimum non-whitespace characters across a finished turn's text to distill. Defaults to 40. */
+  minTurnChars?: number
+  /** Auxiliary distillation output-token cap (circuit breaker, not a user knob). Defaults to 2048. */
+  maxDistillTokens?: number
+  /** End-to-end auxiliary distillation deadline in milliseconds. Defaults to 30000. */
+  distillTimeoutMs?: number
+  /** Optional explicit auxiliary route; must be paired with `model`. */
+  provider?: string
+  /** Optional explicit auxiliary model; must be paired with `provider`. */
+  model?: string
+  /** Journal calendar timezone. Omitted means the Node process timezone. */
+  timeZone?: string
+  /** Maximum UTF-8 bytes of the complete session-start injected context. Defaults to 16384. */
+  maxInjectBytes?: number
+  /** Cap on project→global upgrade candidates one `/memory-review` run proposes. Defaults to 5. */
+  maxReviewCandidates?: number
+  /** Age in days after which the panel marks a note with a review badge. Defaults to 30. */
+  reviewAfterDays?: number
+}
+
+/** The distillation instruction families the settings card switches between. */
+export type DistillMode = 'concise' | 'detailed'
+```
+
+Source: [`packages/memory/memory-lifecycle/src/config.ts:13`](../packages/memory/memory-lifecycle/src/config.ts)
+
+<a id="deepseek-aidsh-memory-local"></a>
+
+## `@deepseek-ai/dsh-memory-local`
+
+Requires: `memory`
+
+```ts config-catalog
+/** Plugin configuration. */
+export interface Config {
+  /** Watch each vault and reconcile external edits; defaults to true. */
+  watch?: boolean
+  /** Watcher write-settle window in milliseconds; defaults to 100. */
+  debounceMs?: number
+  /** Search result cap; defaults to 20. */
+  maxSearchResults?: number
+  /** Traversal node cap; defaults to 50. */
+  maxTraverseNodes?: number
+  /** Listing row cap; defaults to 200. */
+  maxListNotes?: number
+}
+```
+
+Source: [`packages/memory/memory-local/src/index.ts:62`](../packages/memory/memory-local/src/index.ts)
+
 <a id="deepseek-aidsh-message-feedback"></a>
 
 ## `@deepseek-ai/dsh-message-feedback`
@@ -3042,6 +3121,7 @@ These load from a `cordis.yml` entry with no `config:` block; they declare no co
 - `@deepseek-ai/dsh-client-ui-input-trigger` ([`packages/client/ui-input-trigger/src/index.ts`](../packages/client/ui-input-trigger/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-jobs` ([`packages/client/ui-jobs/src/index.ts`](../packages/client/ui-jobs/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-layout` ([`packages/client/ui-layout/src/index.ts`](../packages/client/ui-layout/src/index.ts))
+- `@deepseek-ai/dsh-client-ui-memory` ([`packages/client/ui-memory/src/index.ts`](../packages/client/ui-memory/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-message-feedback` ([`packages/client/ui-message-feedback/src/index.ts`](../packages/client/ui-message-feedback/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-model-selection` ([`packages/client/ui-model-selection/src/index.ts`](../packages/client/ui-model-selection/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-permission-presets` ([`packages/client/ui-permission-presets/src/index.ts`](../packages/client/ui-permission-presets/src/index.ts))
@@ -3073,6 +3153,7 @@ These load from a `cordis.yml` entry with no `config:` block; they declare no co
 - `@deepseek-ai/dsh-host-plugin-inventory` — requires `loader` ([`packages/host/plugin-inventory/src/index.ts`](../packages/host/plugin-inventory/src/index.ts))
 - `@deepseek-ai/dsh-llm` ([`packages/llm/llm/src/index.ts`](../packages/llm/llm/src/index.ts))
 - `@deepseek-ai/dsh-lsp` ([`packages/lsp/lsp/src/index.ts`](../packages/lsp/lsp/src/index.ts))
+- `@deepseek-ai/dsh-memory-remote` — requires `memory` · `agents` ([`packages/memory/memory-remote/src/index.ts`](../packages/memory/memory-remote/src/index.ts))
 - `@deepseek-ai/dsh-schedule` — requires `agents` · `sessions` · `tools` · `sessionPersistence` ([`packages/schedule/schedule/src/index.ts`](../packages/schedule/schedule/src/index.ts))
 - `@deepseek-ai/dsh-session` ([`packages/core/session/src/index.ts`](../packages/core/session/src/index.ts))
 - `@deepseek-ai/dsh-session-checkpoint-policy` — requires `llm` · `sessionPersistence` · `sessions` · `tools` ([`packages/session/session-checkpoint-policy/src/index.ts`](../packages/session/session-checkpoint-policy/src/index.ts))
@@ -3087,6 +3168,7 @@ These load from a `cordis.yml` entry with no `config:` block; they declare no co
 - `@deepseek-ai/dsh-tool-ask-user` — requires `tools` · `userQuestions` ([`packages/interaction/tool-ask-user/src/index.ts`](../packages/interaction/tool-ask-user/src/index.ts))
 - `@deepseek-ai/dsh-tool-call-timeout-policy` — requires `tools` ([`packages/guard/timeout-policy/src/index.ts`](../packages/guard/timeout-policy/src/index.ts))
 - `@deepseek-ai/dsh-tool-cordis` — requires `tools` · `systemPrompt` · `dynamicCordisRunner` · `cordisInspect` ([`packages/extensions/tool-cordis/src/index.ts`](../packages/extensions/tool-cordis/src/index.ts))
+- `@deepseek-ai/dsh-tool-memory` — requires `memory` · `tools` ([`packages/memory/tool-memory/src/index.ts`](../packages/memory/tool-memory/src/index.ts))
 - `@deepseek-ai/dsh-tool-subagent-control` — requires `tools` · `subagents` ([`packages/subagent/tool-subagent-control/src/index.ts`](../packages/subagent/tool-subagent-control/src/index.ts))
 - `@deepseek-ai/dsh-user-questions` ([`packages/interaction/user-questions/src/index.ts`](../packages/interaction/user-questions/src/index.ts))
 - `@deepseek-ai/dsh-workspace` — requires `storageDomain` · `sessionPersistence` ([`packages/workspace/workspace/src/index.ts`](../packages/workspace/workspace/src/index.ts))

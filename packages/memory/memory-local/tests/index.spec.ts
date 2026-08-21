@@ -1,0 +1,1223 @@
+import { Context } from '@deepseek-ai/cordis'
+import { mkdtemp, mkdir, readdir, rm, writeFile, readFile, stat } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { basename, join } from 'node:path'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import MemoryService from '@deepseek-ai/dsh-memory'
+import { LocalMemoryProvider, apply, extractWikiLinks, firstLine, inject, moveToTrash, name, resolveConfig, silentWarn } from '@deepseek-ai/dsh-memory-local'
+import type { LocalMemoryProviderDistillHooks } from '@deepseek-ai/dsh-memory-local'
+import type { WatchImpl, WatchLike } from '../src/watcher.ts'
+
+let root: string
+const dirs: string[] = []
+
+beforeEach(async () => {
+  root = await mkdtemp(join(tmpdir(), 'dsh-memory-local-'))
+  dirs.length = 0
+})
+
+afterEach(async () => {
+  await rm(root, { recursive: true, force: true })
+})
+
+const globalDir = () => join(root, 'home', 'memory')
+const projectDir = () => join(root, 'work', 'proj', '.dsh', 'memory')
+const chain = () => [projectDir(), globalDir()]
+
+class FakeHandle implements WatchLike {
+  closed = false
+  private readonly listeners = new Map<string, Array<(...args: unknown[]) => void>>()
+  constructor(readonly dir: string) {}
+  on(event: string, listener: (...args: unknown[]) => void): unknown {
+    const list = this.listeners.get(event) ?? []
+    list.push(listener)
+    this.listeners.set(event, list)
+    return this
+  }
+  emit(event: string, ...args: unknown[]): void {
+    for (const listener of this.listeners.get(event) ?? []) listener(...args)
+  }
+  async close(): Promise<void> { this.closed = true }
+}
+
+function fakeWatch(): { impl: WatchImpl; handles: FakeHandle[] } {
+  const handles: FakeHandle[] = []
+  const impl: WatchImpl = (dir: string) => {
+    const handle = new FakeHandle(dir)
+    handles.push(handle)
+    return handle
+  }
+  return { impl, handles }
+}
+
+function provider(watch?: boolean  ) {
+  const config = resolveConfig({ watch: watch ?? true, debounceMs: 5 })
+  return new LocalMemoryProvider(config, fakeWatch().impl)
+}
+
+function distillProvider(hooks: LocalMemoryProviderDistillHooks = {}) {
+  return new LocalMemoryProvider(resolveConfig({ watch: false }), fakeWatch().impl, silentWarn, () => {}, hooks)
+}
+
+async function rejectionOf(promise: Promise<unknown>): Promise<unknown> {
+  try {
+    await promise
+  } catch (error: unknown) {
+    return error
+  }
+  throw new Error('expected promise to reject')
+}
+
+function expectFsErrorCode(error: unknown): void {
+  expect(error).toBeInstanceOf(Error)
+  if (!(error instanceof Error)) return
+  expect((error as NodeJS.ErrnoException).code).toMatch(/EISDIR|EPERM/)
+}
+
+function configured(config: { watch?: boolean; maxSearchResults?: number; maxTraverseNodes?: number; maxListNotes?: number }) {
+  return new LocalMemoryProvider(resolveConfig(config), fakeWatch().impl)
+}
+
+const input = (extra: Partial<Parameters<LocalMemoryProvider['write']>[0]> = {}) => ({
+  scope: 'global' as const,
+  title: 'My note',
+  content: 'Body about vitest.',
+  ...extra,
+})
+
+describe('LocalMemoryProvider write/read', () => {
+  it('round-trips a created note with stable identity and Obsidian-readable files', async () => {
+    const p = provider(false)
+    const written = await p.write(input(), globalDir())
+    expect(written.scope).toBe('global')
+    expect(written.path).toBe('notes/my-note.md')
+
+    const file = await readFile(join(globalDir(), written.path), 'utf8')
+    expect(file).toContain('id:')
+    expect(file).toContain('Body about vitest.')
+
+    const read = await p.read(written.id, [globalDir()])
+    expect(read.title).toBe('My note')
+    expect(read.body).toBe('Body about vitest.')
+    expect(read.scope).toBe('global')
+    expect(read.id).toBe(written.id)
+    await p.dispose()
+  })
+
+  it('replaces by id in place, preserving created and path', async () => {
+    const p = provider(false)
+    const first = await p.write(input(), globalDir())
+    const second = await p.write(input({ id: first.id, content: 'Replaced body.' }), globalDir())
+    expect(second.path).toBe(first.path)
+    expect(second.created).toBe(first.created)
+    expect(second.id).toBe(first.id)
+    expect((await p.read(first.id, [globalDir()])).body).toBe('Replaced body.')
+    await p.dispose()
+  })
+
+  it('suffixes path collisions without touching sibling notes', async () => {
+    const p = provider(false)
+    const first = await p.write(input({ title: 'Collide' }), globalDir())
+    const second = await p.write(input({ title: 'Collide' }), globalDir())
+    expect(first.path).toBe('notes/collide.md')
+    expect(second.path).toBe('notes/collide-2.md')
+    await p.dispose()
+  })
+
+  it('finds notes across the chain by id or exact title, project first', async () => {
+    const p = provider(false)
+    const project = await p.write(input({ scope: 'project', title: 'Project note' }), projectDir())
+    const global = await p.write(input({ title: 'Global note' }), globalDir())
+    expect((await p.read(project.id, chain())).scope).toBe('project')
+    expect((await p.read('Global note', chain())).scope).toBe('global')
+    expect((await p.read(global.id, [globalDir()])).scope).toBe('global')
+    await expect(p.read('missing', chain())).rejects.toMatchObject({ code: 'NOT_FOUND' })
+    await p.dispose()
+  })
+
+  it('rejects an aborted write before touching disk', async () => {
+    const p = provider(false)
+    const controller = new AbortController()
+    controller.abort(new Error('stop'))
+    await expect(p.write(input(), globalDir(), controller.signal)).rejects.toThrow('stop')
+    await p.dispose()
+  })
+
+  it('keeps the exclusive chain usable after a failed write', async () => {
+    const p = provider(false)
+    await mkdir(globalDir(), { recursive: true })
+    await writeFile(join(globalDir(), 'notes'), 'blocker file', 'utf8')
+    await expect(p.write(input(), globalDir())).rejects.toThrow()
+    const blocked = join(root, 'work', 'proj', '.dsh', 'memory')
+    const ok = await p.write(input({ title: 'Recovered' }), blocked)
+    expect(ok.path).toBe('notes/recovered.md')
+    await p.dispose()
+  })
+
+  it('drops stale rows during a full reconcile on open', async () => {
+    const first = provider(false)
+    const written = await first.write(input(), globalDir())
+    await first.dispose()
+    await rm(join(globalDir(), written.path))
+    const second = provider(false)
+    await expect(second.read(written.id, [globalDir()])).rejects.toMatchObject({ code: 'NOT_FOUND' })
+    expect(await second.search('vitest', undefined, [globalDir()])).toEqual([])
+    await second.dispose()
+  })
+
+  it('falls back to file mtime for unparseable created timestamps', async () => {
+    await mkdir(join(globalDir(), 'notes'), { recursive: true })
+    await writeFile(join(globalDir(), 'notes', 'weird.md'), '---\nid: x1\nscope: global\ntitle: Weird\ncreated: garbage\nupdated: garbage\n---\nbody', 'utf8')
+    const p = provider(false)
+    const updated = await p.write(input({ id: 'x1' as never, title: 'Weird' }), globalDir())
+    expect(Number.isFinite(Date.parse(updated.created))).toBe(true)
+    await p.dispose()
+  })
+
+  it('reports watcher faults through the provider warn path', async () => {
+    const { impl, handles } = fakeWatch()
+    const warn = vi.fn()
+    const p = new LocalMemoryProvider(resolveConfig({ watch: true, debounceMs: 5 }), impl, warn)
+    await p.write(input(), globalDir())
+    handles[0]!.emit('error', new Error('backend failed'))
+    expect(warn).toHaveBeenCalledWith(expect.any(Error))
+    await p.dispose()
+  })
+})
+
+describe('LocalMemoryProvider search', () => {
+  it('ranks hits and puts project hits first across the chain', async () => {
+    const p = provider(false)
+    await p.write(input({ title: 'Project vitest' }), projectDir())
+    await p.write(input({ title: 'Global vitest' }), globalDir())
+    const hits = await p.search('vitest', undefined, chain())
+    expect(hits.map(hit => hit.scope)).toEqual(['project', 'global'])
+    expect(hits[0]?.title).toBe('Project vitest')
+    expect(hits[0]?.id).toBeTruthy()
+    await p.dispose()
+  })
+
+  it('returns no hits for an empty query and caps at maxSearchResults', async () => {
+    const p = configured({ watch: false, maxSearchResults: 1 })
+    await p.write(input({ title: 'One' }), globalDir())
+    await p.write(input({ title: 'Two' }), globalDir())
+    expect(await p.search('   ', undefined, [globalDir()])).toEqual([])
+    const hits = await p.search('vitest', undefined, [globalDir()])
+    expect(hits).toHaveLength(1)
+    await p.dispose()
+  })
+
+  it('stops after the cap is reached and skips later chain directories', async () => {
+    const p = configured({ watch: false, maxSearchResults: 1 })
+    await p.write(input({ title: 'Project hit' }), projectDir())
+    await p.write(input({ title: 'Global hit' }), globalDir())
+    const hits = await p.search('vitest', undefined, chain())
+    expect(hits).toHaveLength(1)
+    expect(hits[0]?.scope).toBe('project')
+    await p.dispose()
+  })
+
+  it('validates an explicit limit and honors it below the config cap', async () => {
+    const p = provider(false)
+    await p.write(input({ title: 'One' }), globalDir())
+    await p.write(input({ title: 'Two' }), globalDir())
+    await expect(p.search('vitest', { limit: 0 }, [globalDir()])).rejects.toThrow('limit must be a positive integer')
+    expect(await p.search('vitest', { limit: 1 }, [globalDir()])).toHaveLength(1)
+    await p.dispose()
+  })
+})
+
+describe('LocalMemoryProvider traverse', () => {
+  it('walks outgoing and incoming links with resolution and dangling marks', async () => {
+    const p = provider(false)
+    const target = await p.write(input({ title: 'Target' }), globalDir())
+    const source = await p.write(input({ title: 'Source', content: 'See [[Target]] and [[Missing]].', related: ['Target'] }), globalDir())
+    const traversal = await p.traverse(source.id, undefined, [globalDir()])
+    expect(traversal.start.title).toBe('Source')
+    const byTitle = Object.fromEntries(traversal.nodes.map(node => [node.title, node]))
+    expect(byTitle['Target']?.via).toEqual({ kind: 'related', direction: 'out' })
+    expect(byTitle['Missing']?.via).toEqual({ kind: 'wikilink', direction: 'out' })
+    expect(byTitle['Missing']?.id).toBeUndefined()
+    const backlinks = await p.traverse(target.id, undefined, [globalDir()])
+    expect(backlinks.nodes.map(node => node.title)).toEqual(['Source', 'Source'])
+    expect(backlinks.nodes[0]?.via).toEqual({ kind: 'wikilink', direction: 'in' })
+    expect(backlinks.nodes[1]?.via).toEqual({ kind: 'related', direction: 'in' })
+    await p.dispose()
+  })
+
+  it('filters kinds, honors depth, and truncates at the node cap', async () => {
+    const p = configured({ watch: false, maxTraverseNodes: 2 })
+    await p.write(input({ title: 'A' }), globalDir())
+    await p.write(input({ title: 'B', content: '[[A]]', related: ['A'] }), globalDir())
+    const wikilinkOnly = await p.traverse('B', { kinds: ['wikilink'] }, [globalDir()])
+    expect(wikilinkOnly.nodes.map(node => node.title)).toEqual(['A'])
+    expect(wikilinkOnly.truncated).toBe(false)
+
+    await p.write(input({ title: 'C', content: '[[B]]' }), globalDir())
+    await p.write(input({ title: 'D', content: '[[B]]' }), globalDir())
+    const truncated = await p.traverse('B', { depth: 1 }, [globalDir()])
+    expect(truncated.truncated).toBe(true)
+    expect(truncated.nodes).toHaveLength(2)
+
+    const relatedOnly = await p.traverse('B', { kinds: ['related'] }, [globalDir()])
+    expect(relatedOnly.nodes.map(node => node.via)).toEqual([{ kind: 'related', direction: 'out' }])
+
+    const deep = await p.traverse('C', { depth: 2 }, [globalDir()])
+    expect(deep.nodes.some(node => node.title === 'A')).toBe(true)
+    await p.dispose()
+  })
+
+  it('rejects invalid depth and kinds, and misses with NOT_FOUND', async () => {
+    const p = provider(false)
+    await expect(p.traverse('n1', { depth: 3 as never }, [globalDir()])).rejects.toThrow('depth must be 1 or 2')
+    await expect(p.traverse('n1', { kinds: ['other' as never] }, [globalDir()])).rejects.toThrow('unknown link kind')
+    await expect(p.traverse('missing', undefined, [globalDir()])).rejects.toMatchObject({ code: 'NOT_FOUND' })
+    await p.dispose()
+  })
+
+  it('deduplicates edges reached over multiple paths', async () => {
+    const p = provider(false)
+    await p.write(input({ title: 'C' }), globalDir())
+    await p.write(input({ title: 'B', content: '[[C]]' }), globalDir())
+    await p.write(input({ title: 'A', content: '[[B]] [[C]]' }), globalDir())
+    const traversal = await p.traverse('A', { depth: 2 }, [globalDir()])
+    expect(traversal.nodes.filter(node => node.title === 'C')).toHaveLength(1)
+    await p.dispose()
+  })
+
+  it('truncates when the cap is hit while collecting backlinks', async () => {
+    const p = configured({ watch: false, maxTraverseNodes: 2 })
+    await p.write(input({ title: 'A' }), globalDir())
+    await p.write(input({ title: 'C', content: '[[A]]' }), globalDir())
+    await p.write(input({ title: 'D', content: '[[A]]' }), globalDir())
+    const traversal = await p.traverse('A', undefined, [globalDir()])
+    expect(traversal.truncated).toBe(true)
+    expect(traversal.nodes).toHaveLength(2)
+    await p.dispose()
+  })
+
+  it('returns empty adjacency for an isolated note', async () => {
+    const p = provider(false)
+    const note = await p.write(input({ title: 'Isolated' }), globalDir())
+    const traversal = await p.traverse(note.id, { depth: 2 }, [globalDir()])
+    expect(traversal.nodes).toEqual([])
+    expect(traversal.truncated).toBe(false)
+    await p.dispose()
+  })
+
+  it('reports dangling related targets on read', async () => {
+    const p = provider(false)
+    const note = await p.write(input({ title: 'Linker', related: ['Nope'] }), globalDir())
+    const read = await p.read(note.id, [globalDir()])
+    expect(read.related).toEqual([{ title: 'Nope' }])
+    await p.dispose()
+  })
+
+  it('resolves related targets to ids on read', async () => {
+    const p = provider(false)
+    const target = await p.write(input({ title: 'Real' }), globalDir())
+    const linker = await p.write(input({ title: 'Linker2', related: ['Real'] }), globalDir())
+    const read = await p.read(linker.id, [globalDir()])
+    expect(read.related).toEqual([{ id: target.id, title: 'Real' }])
+    await p.dispose()
+  })
+})
+
+describe('LocalMemoryProvider adoption and reconciliation', () => {
+  it('adopts plain and frontmatter-less markdown as searchable memory on open', async () => {
+    await mkdir(join(globalDir(), 'notes'), { recursive: true })
+    await mkdir(join(globalDir(), 'journal'), { recursive: true })
+    await writeFile(join(globalDir(), 'notes', 'existing.md'), 'Raw adopted knowledge about radishes.\n', 'utf8')
+    await writeFile(join(globalDir(), 'journal', '2026-08-18.md'), '# Day one\nTried [[existing]] today.\n', 'utf8')
+    const p = provider(false)
+    const hits = await p.search('radishes', undefined, [globalDir()])
+    expect(hits[0]?.title).toBe('existing')
+    const journal = await p.search('Tried', undefined, [globalDir()])
+    expect(journal[0]?.title).toBe('2026-08-18')
+    const adopted = await p.read('existing', [globalDir()])
+    expect(adopted.body).toContain('radishes')
+    await p.dispose()
+  })
+
+  it('reconciles external edits through the watcher and deletion through scans', async () => {
+    const { impl, handles } = fakeWatch()
+    const p = new LocalMemoryProvider(resolveConfig({ watch: true, debounceMs: 5 }), impl)
+    const written = await p.write(input(), globalDir())
+    const path = join(globalDir(), written.path)
+    await writeFile(path, await readFile(path, 'utf8').then(text => text.replace('vitest', 'jest')), 'utf8')
+    handles[0]!.emit('all', 'change', path)
+    await new Promise(resolve => setTimeout(resolve, 15))
+    expect((await p.read(written.id, [globalDir()])).body).toContain('jest')
+
+    await rm(path)
+    handles[0]!.emit('all', 'unlink', path)
+    await new Promise(resolve => setTimeout(resolve, 15))
+    await expect(p.read(written.id, [globalDir()])).rejects.toMatchObject({ code: 'NOT_FOUND' })
+    await p.dispose()
+    expect(handles[0]!.closed).toBe(true)
+  })
+
+  it('re-checks mtimes on read even without a watcher', async () => {
+    const p = provider(false)
+    const written = await p.write(input(), globalDir())
+    const path = join(globalDir(), written.path)
+    await writeFile(path, await readFile(path, 'utf8').then(text => text.replace('vitest', 'jest')), 'utf8')
+    expect((await p.read(written.id, [globalDir()])).body).toContain('jest')
+    await p.dispose()
+  })
+
+  it('drops index rows for files deleted while unobserved', async () => {
+    const p = provider(false)
+    const written = await p.write(input(), globalDir())
+    await rm(join(globalDir(), written.path))
+    await expect(p.read(written.id, [globalDir()])).rejects.toMatchObject({ code: 'NOT_FOUND' })
+    await p.dispose()
+  })
+
+  it('ignores .obsidian contents during scans', async () => {
+    await mkdir(join(globalDir(), '.obsidian'), { recursive: true })
+    await writeFile(join(globalDir(), '.obsidian', 'workspace.md'), 'secret obsidian config', 'utf8')
+    const p = provider(false)
+    expect(await p.search('secret', undefined, [globalDir()])).toEqual([])
+    await p.dispose()
+  })
+})
+
+describe('LocalMemoryProvider lifecycle', () => {
+  it('keeps data across provider unload and remount', async () => {
+    const first = provider(false)
+    const written = await first.write(input(), globalDir())
+    await first.dispose()
+    const second = provider(false)
+    expect((await second.read(written.id, [globalDir()])).title).toBe('My note')
+    await second.dispose()
+  })
+})
+
+describe('LocalMemoryProvider persona, recency, and journal', () => {
+  it('reads the persona note whole or returns undefined without one', async () => {
+    const p = provider(false)
+    await expect(p.readPersona(globalDir())).resolves.toBeUndefined()
+    await mkdir(globalDir(), { recursive: true })
+    await writeFile(join(globalDir(), 'MEMORY.md'), '# Persona\nLikes tea.\n', 'utf8')
+    await expect(p.readPersona(globalDir())).resolves.toEqual({ path: 'MEMORY.md', text: '# Persona\nLikes tea.\n' })
+    await p.dispose()
+  })
+
+  it('rejects an aborted persona read before touching disk', async () => {
+    const p = provider(false)
+    const controller = new AbortController()
+    controller.abort(new Error('stop'))
+    await expect(p.readPersona(globalDir(), controller.signal)).rejects.toThrow('stop')
+    await p.dispose()
+  })
+
+  it('fails loudly when the persona path is not a readable file', async () => {
+    const p = provider(false)
+    await mkdir(join(globalDir(), 'MEMORY.md'), { recursive: true })
+    await expect(p.readPersona(globalDir())).rejects.toThrow()
+    await p.dispose()
+  })
+
+  it('lists topic notes newest first, journal and persona excluded', async () => {
+    const p = provider(false)
+    const first = await p.write(input({ title: 'Older' }), globalDir())
+    const second = await p.write(input({ title: 'Newer' }), globalDir())
+    await p.appendJournal({ scope: 'global', date: '2026-08-18', title: 'Day', body: '- b' }, globalDir())
+    await mkdir(globalDir(), { recursive: true })
+    await writeFile(join(globalDir(), 'MEMORY.md'), 'persona', 'utf8')
+    const recent = await p.recentNotes({ limit: 10 }, globalDir())
+    expect(recent.map(note => note.path)).toEqual([second.path, first.path])
+    expect(recent.map(note => note.title)).toEqual(['Newer', 'Older'])
+    expect(recent.every(note => note.path.startsWith('notes/'))).toBe(true)
+    expect(recent[0]?.body).toBe('Body about vitest.')
+    expect(Number.isFinite(recent[0]?.updated)).toBe(true)
+    await p.dispose()
+  })
+
+  it('caps recency at the config bound and validates explicit limits', async () => {
+    const p = configured({ watch: false, maxSearchResults: 1 })
+    await p.write(input({ title: 'One' }), globalDir())
+    await p.write(input({ title: 'Two' }), globalDir())
+    expect(await p.recentNotes(undefined, globalDir())).toHaveLength(1)
+    expect(await p.recentNotes({ limit: 1 }, globalDir())).toHaveLength(1)
+    await expect(p.recentNotes({ limit: 0 }, globalDir())).rejects.toThrow('recent limit must be a positive integer')
+    await expect(p.recentNotes({ limit: 1.5 }, globalDir())).rejects.toThrow('recent limit must be a positive integer')
+    await p.dispose()
+  })
+
+  it('serves adopted notes with their raw text as the recency body', async () => {
+    const p = provider(false)
+    await mkdir(join(globalDir(), 'notes'), { recursive: true })
+    await writeFile(join(globalDir(), 'notes', 'foreign.md'), 'Adopted raw text.\n', 'utf8')
+    await p.write(input(), globalDir())
+    const recent = await p.recentNotes(undefined, globalDir())
+    expect(recent.map(note => note.path)).toEqual(['notes/my-note.md', 'notes/foreign.md'])
+    expect(recent[1]?.body).toBe('Adopted raw text.\n')
+    await p.dispose()
+  })
+
+  it('honors an abort landed before the recency scan starts', async () => {
+    const p = provider(false)
+    await p.write(input(), globalDir())
+    const controller = new AbortController()
+    const pending = p.recentNotes(undefined, globalDir(), controller.signal)
+    controller.abort(new Error('stop'))
+    await expect(pending).rejects.toThrow('stop')
+    await p.dispose()
+  })
+
+  it('appends journal entries in Obsidian format and indexes them', async () => {
+    const p = provider(false)
+    const appended = await p.appendJournal({
+      scope: 'global',
+      date: '2026-08-18',
+      title: 'Fork sync',
+      body: '- Merged upstream.\n- Touched: [[My note]]',
+    }, globalDir())
+    expect(appended).toEqual({ path: 'journal/2026-08-18.md', date: '2026-08-18' })
+    const file = await readFile(join(globalDir(), appended.path), 'utf8')
+    expect(file.startsWith('---\ntype: journal\ndate: 2026-08-18\n---\n')).toBe(true)
+    expect(file).toContain('## Fork sync\n- Merged upstream.')
+    const hits = await p.search('upstream', undefined, [globalDir()])
+    expect(hits[0]?.title).toBe('2026-08-18')
+    await p.dispose()
+  })
+
+  it('appends into the same day file and defaults to the UTC day', async () => {
+    const p = provider(false)
+    await p.appendJournal({ scope: 'global', title: 'First', body: '- a' }, globalDir())
+    const path = `journal/${new Date().toISOString().slice(0, 10)}.md`
+    const first = await readFile(join(globalDir(), path), 'utf8')
+    await p.appendJournal({ scope: 'global', title: 'Second', body: '- b' }, globalDir())
+    const second = await readFile(join(globalDir(), path), 'utf8')
+    expect(first).toContain('## First')
+    expect(second).toContain('## First')
+    expect(second).toContain('## Second')
+    expect(second.length).toBeGreaterThan(first.length)
+    await p.dispose()
+  })
+
+  it('serializes concurrent appends to one day file on the exclusive chain', async () => {
+    const p = provider(false)
+    await Promise.all([
+      p.appendJournal({ scope: 'global', date: '2026-08-18', title: 'A', body: '- a' }, globalDir()),
+      p.appendJournal({ scope: 'global', date: '2026-08-18', title: 'B', body: '- b' }, globalDir()),
+    ])
+    const text = await readFile(join(globalDir(), 'journal', '2026-08-18.md'), 'utf8')
+    expect(text).toContain('## A\n- a')
+    expect(text).toContain('## B\n- b')
+    expect(text.indexOf('type: journal', text.indexOf('type: journal') + 1)).toBe(-1)
+    await p.dispose()
+  })
+
+  it('validates journal dates, titles, and bodies loudly', async () => {
+    const p = provider(false)
+    await expect(p.appendJournal({ scope: 'global', date: '2026-2-3', title: 'T', body: '- b' }, globalDir())).rejects.toThrow('YYYY-MM-DD')
+    await expect(p.appendJournal({ scope: 'global', date: '2026-02-30', title: 'T', body: '- b' }, globalDir())).rejects.toThrow('not a real calendar day')
+    await expect(p.appendJournal({ scope: 'global', title: '', body: '- b' }, globalDir())).rejects.toThrow('single non-empty line')
+    await expect(p.appendJournal({ scope: 'global', title: 'multi\nline', body: '- b' }, globalDir())).rejects.toThrow('single non-empty line')
+    await expect(p.appendJournal({ scope: 'global', title: 'T', body: '   ' }, globalDir())).rejects.toThrow('body must not be empty')
+    await p.dispose()
+  })
+
+  it('rejects an aborted journal append before touching disk', async () => {
+    const p = provider(false)
+    const controller = new AbortController()
+    controller.abort(new Error('stop'))
+    await expect(p.appendJournal({ scope: 'global', title: 'T', body: '- b' }, globalDir(), controller.signal)).rejects.toThrow('stop')
+    await p.dispose()
+  })
+
+  it('fails loudly when the journal path exists as a directory', async () => {
+    const p = provider(false)
+    await mkdir(join(globalDir(), 'journal', '2026-08-18.md'), { recursive: true })
+    await expect(p.appendJournal({ scope: 'global', date: '2026-08-18', title: 'T', body: '- b' }, globalDir())).rejects.toThrow()
+    await p.dispose()
+  })
+
+  it('reports watcher batches with vault-relative paths to the change consumer', async () => {
+    const { impl, handles } = fakeWatch()
+    const onChange = vi.fn()
+    const p = new LocalMemoryProvider(resolveConfig({ watch: true, debounceMs: 5 }), impl, undefined, onChange)
+    const written = await p.write(input(), globalDir())
+    const path = join(globalDir(), written.path)
+    await writeFile(path, await readFile(path, 'utf8').then(text => text.replace('vitest', 'jest')), 'utf8')
+    handles[0]!.emit('all', 'change', path)
+    await vi.waitFor(() => { expect(onChange).toHaveBeenCalledWith(globalDir(), [written.path]) }, { timeout: 5000 })
+    await p.dispose()
+  })
+
+  it('tolerates unlink batches for files without index rows', async () => {
+    const { impl, handles } = fakeWatch()
+    const p = new LocalMemoryProvider(resolveConfig({ watch: true, debounceMs: 5 }), impl)
+    await p.write(input(), globalDir())
+    handles[0]!.emit('all', 'unlink', join(globalDir(), 'notes', 'ghost.md'))
+    await new Promise(resolve => setTimeout(resolve, 15))
+    expect((await p.read('My note', [globalDir()])).title).toBe('My note')
+    await p.dispose()
+  })
+})
+
+describe('apply and config', () => {
+  it('registers into the memory service and unregisters on plugin fiber disposal', async () => {
+    const ctx = new Context()
+    await ctx.plugin(MemoryService, { dir: globalDir() })
+    const fiber = ctx.plugin({ name, inject, apply }, { watch: true })
+    await fiber
+    await ctx.memory.write(input(), undefined)
+    expect((await ctx.memory.read('My note', undefined)).title).toBe('My note')
+    await fiber.dispose()
+    await expect(ctx.memory.read('x', undefined)).rejects.toMatchObject({ code: 'NO_PROVIDER' })
+    await ctx.fiber.dispose()
+  })
+
+  it('validates numeric config loudly', () => {
+    expect(() => resolveConfig({ debounceMs: 0 })).toThrow('debounceMs must be a positive integer')
+    expect(() => resolveConfig({ maxSearchResults: 1.5 })).toThrow('maxSearchResults must be a positive integer')
+    expect(() => resolveConfig({ maxTraverseNodes: -1 })).toThrow('maxTraverseNodes must be a positive integer')
+    expect(() => resolveConfig({ maxListNotes: 0 })).toThrow('maxListNotes must be a positive integer')
+    expect(resolveConfig({})).toEqual({
+      watch: true, debounceMs: 100, maxSearchResults: 20, maxTraverseNodes: 50, maxListNotes: 200,
+    })
+    expect(resolveConfig({ watch: false, debounceMs: 7, maxSearchResults: 3, maxTraverseNodes: 4, maxListNotes: 5 }))
+      .toEqual({ watch: false, debounceMs: 7, maxSearchResults: 3, maxTraverseNodes: 4, maxListNotes: 5 })
+    expect(resolveConfig(undefined as never)).toEqual({
+      watch: true, debounceMs: 100, maxSearchResults: 20, maxTraverseNodes: 50, maxListNotes: 200,
+    })
+  })
+
+  it('supports constructor defaults without a watcher factory', async () => {
+    const p = new LocalMemoryProvider(resolveConfig({ watch: false }))
+    const written = await p.write(input(), globalDir())
+    expect((await p.read(written.id, [globalDir()])).title).toBe('My note')
+    silentWarn()
+    await p.dispose()
+  })
+
+  it('emits memory/change for watcher-observed vault edits', async () => {
+    const ctx = new Context()
+    await ctx.plugin(MemoryService, { dir: globalDir() })
+    const changes: Array<{ dir: string; paths: string[] }> = []
+    ctx.on('memory/change', (payload) => { changes.push(payload) })
+    const fiber = ctx.plugin({ name, inject, apply }, { watch: true, debounceMs: 5 })
+    await fiber
+    // The first write opens the vault, so it races the watcher's startup scan;
+    // the ready pass (empty batch) marks the watcher live. A later write is
+    // observed directly.
+    await ctx.memory.write(input(), undefined)
+    await vi.waitFor(() => { expect(changes.some(change => change.paths.length === 0)).toBe(true) }, { timeout: 10_000 })
+    await ctx.memory.write(input({ title: 'Watched' }), undefined)
+    await vi.waitFor(() => { expect(changes.some(change => change.paths.includes('notes/watched.md'))).toBe(true) }, { timeout: 10_000 })
+    await fiber.dispose()
+    await ctx.fiber.dispose()
+  }, 15_000)
+})
+
+describe('LocalMemoryProvider listNotes', () => {
+  it('pins the persona first, then notes rows newest first, excluding the journal', async () => {
+    const p = provider(false)
+    await mkdir(globalDir(), { recursive: true })
+    await writeFile(join(globalDir(), 'MEMORY.md'), 'Persona first line.\n\nMore persona.', 'utf8')
+    await p.write(input({ title: 'Older' }), globalDir())
+    await p.write(input({ title: 'Newer' }), globalDir())
+    await p.appendJournal({ scope: 'global', title: 'Day work', body: '- did things' }, globalDir())
+
+    const listed = await p.listNotes(undefined, globalDir())
+    expect(listed.map(note => note.path)).toEqual(['MEMORY.md', 'notes/newer.md', 'notes/older.md'])
+    expect(listed[0]).toMatchObject({ persona: true, title: 'MEMORY', tags: [], excerpt: 'Persona first line.' })
+    expect(listed[1]).toMatchObject({ persona: false, title: 'Newer', excerpt: 'Body about vitest.' })
+    await p.dispose()
+  })
+
+  it('lists adopted files under notes/ with their first-line excerpt', async () => {
+    const p = provider(false)
+    await mkdir(join(globalDir(), 'notes'), { recursive: true })
+    await writeFile(join(globalDir(), 'notes', 'foreign.md'), '\nFirst real line.\nSecond line.', 'utf8')
+    await writeFile(join(globalDir(), 'notes', 'blank.md'), '  \n\t\n', 'utf8')
+    const listed = await p.listNotes(undefined, globalDir())
+    expect(listed).toHaveLength(2)
+    expect(listed.find(note => note.path === 'notes/foreign.md')).toMatchObject({ id: 'adopted:notes/foreign.md', title: 'foreign', excerpt: 'First real line.', persona: false })
+    expect(listed.find(note => note.path === 'notes/blank.md')).toMatchObject({ id: 'adopted:notes/blank.md', title: 'blank', excerpt: '', persona: false })
+    expect(firstLine('  \n\t\n  ')).toBe('')
+    await p.dispose()
+  })
+
+  it('caps rows at maxListNotes and validates an explicit limit', async () => {
+    const p = configured({ watch: false, maxListNotes: 2 })
+    await p.write(input({ title: 'A' }), globalDir())
+    await p.write(input({ title: 'B' }), globalDir())
+    await p.write(input({ title: 'C' }), globalDir())
+    const listed = await p.listNotes(undefined, globalDir())
+    expect(listed.map(note => note.title)).toEqual(['C', 'B'])
+    await expect(p.listNotes({ limit: 0 }, globalDir())).rejects.toThrow('list limit must be a positive integer')
+    await p.dispose()
+  })
+})
+
+describe('LocalMemoryProvider distillation commit', () => {
+  const group = (scope: 'project' | 'global', title: string, notes: Array<{ title: string; content: string; tags?: string[]; related?: string[] }> = [{ title: `${title} fact`, content: `${title} body.` }]) => ({
+    scope,
+    date: '2026-08-20',
+    journalTitle: `${title} journal`,
+    journalBody: `- ${title} work.`,
+    notes,
+  })
+
+  it('creates unique additive nodes with exact journal and predecessor links', async () => {
+    const p = distillProvider()
+    const first = await p.commitDistill([group('global', 'First', [
+      { title: 'Repeated fact', content: 'First body.' },
+      { title: 'Second fact', content: 'Second body.' },
+    ])], { project: projectDir(), global: globalDir() })
+    expect(first.notes).toHaveLength(2)
+    expect(new Set(first.notes.map(note => note.journalAnchor))).toEqual(new Set([first.journals[0]!.anchor]))
+    expect(first.notes[0]!.path).toMatch(/^notes\/repeated-fact-[a-f0-9]{8}\.md$/)
+    const original = await readFile(join(globalDir(), first.notes[0]!.path), 'utf8')
+
+    const second = await p.commitDistill([group('global', 'Later', [
+      { title: 'Repeated fact', content: 'Later [[Second fact|body]] and [[Second fact]].', related: ['Second fact', 'missing'] },
+    ])], { project: projectDir(), global: globalDir() })
+    expect(second.notes[0]!.path).not.toBe(first.notes[0]!.path)
+    expect(second.notes[0]!.previous).toMatchObject({ id: first.notes[0]!.id, path: first.notes[0]!.path })
+    expect(await readFile(join(globalDir(), first.notes[0]!.path), 'utf8')).toBe(original)
+    const later = await readFile(join(globalDir(), second.notes[0]!.path), 'utf8')
+    expect(later).toContain(`[[${first.notes[0]!.path.slice(0, -3)}|Repeated fact]]`)
+    expect(later).toContain(`[[journal/2026-08-20#${second.journals[0]!.anchor}|2026-08-20]]`)
+    await p.dispose()
+  })
+
+  it('rejects malformed commit groups before publishing files', async () => {
+    const p = distillProvider()
+    await expect(p.commitDistill([], { project: projectDir(), global: globalDir() })).rejects.toThrow('at least one scope group')
+    await expect(p.commitDistill([group('global', 'Empty', [])], { project: projectDir(), global: globalDir() })).rejects.toThrow('at least one node')
+    await expect(p.commitDistill([group('global', 'A'), group('global', 'B')], { project: projectDir(), global: globalDir() })).rejects.toThrow('duplicate distillation scope')
+    await expect(p.commitDistill([group('project', 'Missing')], { project: undefined, global: globalDir() })).rejects.toMatchObject({ code: 'NO_PROJECT_SCOPE' })
+    await expect(p.commitDistill([{ ...group('global', 'Bad'), journalTitle: '' }], { project: projectDir(), global: globalDir() })).rejects.toThrow('journal title')
+    await expect(p.commitDistill([{ ...group('global', 'Bad'), journalBody: '' }], { project: projectDir(), global: globalDir() })).rejects.toThrow('journal body')
+    await expect(p.commitDistill([group('global', 'Bad', [{ title: '', content: 'body' }])], { project: projectDir(), global: globalDir() })).rejects.toThrow('note title')
+    await expect(p.commitDistill([group('global', 'Bad', [{ title: 'Title', content: '' }])], { project: projectDir(), global: globalDir() })).rejects.toThrow('note content')
+    await p.dispose()
+
+    const badId = distillProvider({ shortId: () => 'bad' })
+    await expect(badId.commitDistill([group('global', 'Bad id')], { project: projectDir(), global: globalDir() })).rejects.toThrow('short id')
+    await badId.dispose()
+  })
+
+  it('commits a project-only group with its coordinator inside the participating vault', async () => {
+    const p = distillProvider()
+    const result = await p.commitDistill([group('project', 'Project only')], {
+      project: projectDir(), global: globalDir(),
+    })
+    expect(result.notes[0]!.scope).toBe('project')
+    expect((await readdir(projectDir())).filter(name => name.endsWith('.committed'))).toEqual([])
+    await p.dispose()
+  })
+
+  it('keeps the short id when a generated filename needs a numeric collision suffix', async () => {
+    await mkdir(join(globalDir(), 'notes'), { recursive: true })
+    await writeFile(join(globalDir(), 'notes/collision-deadbeef.md'), 'occupied', 'utf8')
+    const ids = ['cafebabe', 'deadbeef']
+    const p = distillProvider({ shortId: () => ids.shift()! })
+
+    const result = await p.commitDistill([group('global', 'Collision', [
+      { title: 'Collision', content: 'New collision body.' },
+    ])], { project: projectDir(), global: globalDir() })
+
+    expect(result.notes[0]!.path).toBe('notes/collision-deadbeef-2.md')
+    await p.dispose()
+  })
+
+  it('uses distinct staged files when one group receives the same short id twice', async () => {
+    const ids = ['cafebabe', 'deadbeef', 'deadbeef']
+    const p = distillProvider({ shortId: () => ids.shift()! })
+    const result = await p.commitDistill([group('global', 'Repeated ids', [
+      { title: 'Same title', content: 'First body.' },
+      { title: 'Same title', content: 'Second body.' },
+    ])], { project: projectDir(), global: globalDir() })
+
+    expect(result.notes.map(note => note.path)).toEqual([
+      'notes/same-title-deadbeef.md',
+      'notes/same-title-deadbeef-2.md',
+    ])
+    expect(await readFile(join(globalDir(), result.notes[0]!.path), 'utf8')).toContain('First body.')
+    expect(await readFile(join(globalDir(), result.notes[1]!.path), 'utf8')).toContain('Second body.')
+    await p.dispose()
+  })
+
+  it('rejects equivalent project and global vault paths', async () => {
+    const p = distillProvider()
+    await expect(p.commitDistill([
+      group('project', 'Project'),
+      group('global', 'Global'),
+    ], { project: join(globalDir(), '.'), global: globalDir() })).rejects.toThrow('must use different vault directories')
+    await p.dispose()
+  })
+
+  it.each([
+    'afterStageNote', 'afterStageJournal', 'afterWriteNote', 'afterWriteJournal',
+    'afterIndexNote', 'afterIndexJournal', 'beforeVerify', 'beforeReadNote', 'beforeVerifyLinks',
+  ] as const)('restores both vaults byte-for-byte when %s fails', async (point) => {
+    const fail = async (title?: string): Promise<void> => {
+      if (title === undefined || title.startsWith('Global')) throw new Error(`injected ${point}`)
+    }
+    const hooks: LocalMemoryProviderDistillHooks = {}
+    hooks[point] = fail
+    const p = distillProvider(hooks)
+    await p.appendJournal({ scope: 'project', date: '2026-08-20', title: 'Existing', body: '- project' }, projectDir())
+    await p.appendJournal({ scope: 'global', date: '2026-08-20', title: 'Existing', body: '- global' }, globalDir())
+    const projectBefore = await readFile(join(projectDir(), 'journal/2026-08-20.md'), 'utf8')
+    const globalBefore = await readFile(join(globalDir(), 'journal/2026-08-20.md'), 'utf8')
+
+    await expect(p.commitDistill([
+      group('project', 'Project'),
+      group('global', 'Global'),
+    ], { project: projectDir(), global: globalDir() })).rejects.toThrow(`injected ${point}`)
+
+    expect(await readFile(join(projectDir(), 'journal/2026-08-20.md'), 'utf8')).toBe(projectBefore)
+    expect(await readFile(join(globalDir(), 'journal/2026-08-20.md'), 'utf8')).toBe(globalBefore)
+    expect(await p.search('body', undefined, chain())).toEqual([])
+    expect((await readdir(projectDir())).filter(name => name.startsWith('.memory-distill-'))).toEqual([])
+    expect((await readdir(globalDir())).filter(name => name.startsWith('.memory-distill-'))).toEqual([])
+    await p.dispose()
+  })
+
+  it.each([
+    'journalIndex', 'journalAnchor', 'noteIndex', 'noteBacklink', 'journalLink', 'indexedBacklink', 'predecessor',
+  ] as const)('rolls back when verified state fails the %s check', async (verificationFault) => {
+    if (verificationFault === 'predecessor') {
+      const seed = distillProvider()
+      await seed.commitDistill([group('global', 'Seed', [{ title: 'Verified fact', content: 'Old body.' }])], {
+        project: projectDir(), global: globalDir(),
+      })
+      await seed.dispose()
+    }
+    const p = distillProvider({ verificationFault })
+    await expect(p.commitDistill([group('global', 'Verify', [{ title: 'Verified fact', content: 'New verification body.' }])], {
+      project: projectDir(), global: globalDir(),
+    })).rejects.toThrow('memory-local: committed')
+    expect(await p.search('verification', undefined, [globalDir()])).toEqual([])
+    await p.dispose()
+  })
+
+  it('surfaces a non-missing journal read failure during staging', async () => {
+    await mkdir(join(globalDir(), 'journal/2026-08-20.md'), { recursive: true })
+    const p = distillProvider()
+    const failure = await rejectionOf(p.commitDistill([group('global', 'Unreadable')], {
+      project: projectDir(), global: globalDir(),
+    }))
+    expectFsErrorCode(failure)
+    await p.dispose()
+  })
+
+  it('surfaces both the commit fault and a rollback fault', async () => {
+    const journal = join(globalDir(), 'journal/2026-08-20.md')
+    const p = distillProvider({
+      afterWriteJournal: async () => {
+        await rm(journal, { force: true })
+        await mkdir(journal)
+        throw new Error('injected publish failure')
+      },
+    })
+    await expect(p.commitDistill([group('global', 'Rollback')], {
+      project: projectDir(), global: globalDir(),
+    })).rejects.toThrow('distillation commit and rollback failed')
+    await rm(journal, { recursive: true, force: true })
+    await p.dispose()
+  })
+
+  it('returns the committed receipt when post-commit cleanup fails', async () => {
+    const warned: unknown[] = []
+    const p = new LocalMemoryProvider(
+      resolveConfig({ watch: false }),
+      fakeWatch().impl,
+      (error) => { warned.push(error) },
+      () => {},
+      { beforeFinalize: () => { throw new Error('injected cleanup failure') } },
+    )
+    const result = await p.commitDistill([group('global', 'Committed')], {
+      project: projectDir(), global: globalDir(),
+    })
+
+    expect(result.notes).toHaveLength(1)
+    expect(await readFile(join(globalDir(), result.notes[0]!.path), 'utf8')).toContain('Committed body.')
+    expect(warned[0]).toBeInstanceOf(Error)
+    if (warned[0] instanceof Error) expect(warned[0].message).toBe('injected cleanup failure')
+    expect((await readdir(globalDir())).some(name => name.endsWith('.committed'))).toBe(true)
+    await p.dispose()
+  })
+
+  it('warns instead of rejecting when the committed coordinator cannot be removed', async () => {
+    const warned: unknown[] = []
+    const coordinator = join(globalDir(), '.memory-distill-cafebabe.committed')
+    const ids = ['cafebabe', 'deadbeef']
+    const p = new LocalMemoryProvider(
+      resolveConfig({ watch: false }),
+      fakeWatch().impl,
+      (error) => { warned.push(error) },
+      () => {},
+      {
+        shortId: () => ids.shift() ?? '00000000',
+        beforeFinalize: async () => {
+          await rm(coordinator, { force: true })
+          await mkdir(coordinator)
+        },
+      },
+    )
+    const result = await p.commitDistill([group('global', 'Committed')], {
+      project: projectDir(), global: globalDir(),
+    })
+    expect(result.notes).toHaveLength(1)
+    expectFsErrorCode(warned[0])
+    await rm(coordinator, { recursive: true, force: true })
+    await p.dispose()
+  })
+
+  it.each([false, true])('recovers an interrupted publish when committed is %s', async (committed) => {
+    const dir = globalDir()
+    await mkdir(join(dir, 'journal'), { recursive: true })
+    await mkdir(join(dir, 'notes'), { recursive: true })
+    const coordinator = join(dir, '.memory-distill-deadbeef.committed')
+    await writeFile(join(dir, 'journal/2026-08-20.md'), 'new journal', 'utf8')
+    await writeFile(join(dir, '.memory-distill-deadbeef-global-journal.backup'), 'old journal', 'utf8')
+    await writeFile(join(dir, 'notes/interrupted-deadbeef-2.md'), 'new node', 'utf8')
+    await writeFile(join(dir, '.memory-distill-deadbeef.json'), `${JSON.stringify({
+      coordinatorPath: coordinator,
+      participantManifestPaths: [join(dir, '.memory-distill-deadbeef.json')],
+      journalPath: 'journal/2026-08-20.md',
+      journalStagedPath: '.memory-distill-deadbeef-global-journal.tmp',
+      journalBackupPath: '.memory-distill-deadbeef-global-journal.backup',
+      journalExisted: true,
+      notePaths: ['notes/interrupted-deadbeef-2.md'],
+      noteStagedPaths: ['.memory-distill-deadbeef-note-0-deadbeef.tmp'],
+    })}\n`, 'utf8')
+    if (committed) await writeFile(coordinator, `${JSON.stringify({
+      transactionId: 'deadbeef',
+      participantManifestPaths: [join(dir, '.memory-distill-deadbeef.json')],
+    })}\n`, 'utf8')
+
+    const p = distillProvider()
+    await p.listNotes(undefined, dir)
+    expect(await readFile(join(dir, 'journal/2026-08-20.md'), 'utf8')).toBe(committed ? 'new journal' : 'old journal')
+    if (committed) {
+      expect(await readFile(join(dir, 'notes/interrupted-deadbeef-2.md'), 'utf8')).toBe('new node')
+    } else {
+      await expect(stat(join(dir, 'notes/interrupted-deadbeef-2.md'))).rejects.toMatchObject({ code: 'ENOENT' })
+    }
+    await expect(stat(join(dir, '.memory-distill-deadbeef.json'))).rejects.toMatchObject({ code: 'ENOENT' })
+    if (committed) await expect(stat(coordinator)).rejects.toMatchObject({ code: 'ENOENT' })
+    await p.dispose()
+  })
+
+  it('removes a newly created journal when an uncommitted publish is recovered', async () => {
+    const dir = globalDir()
+    await mkdir(join(dir, 'journal'), { recursive: true })
+    await mkdir(join(dir, 'notes'), { recursive: true })
+    await writeFile(join(dir, 'journal/2026-08-20.md'), 'uncommitted journal', 'utf8')
+    await writeFile(join(dir, 'notes/uncommitted-deadbeef.md'), 'uncommitted note', 'utf8')
+    const manifestPath = join(dir, '.memory-distill-feedface.json')
+    await writeFile(manifestPath, `${JSON.stringify({
+      coordinatorPath: join(dir, '.memory-distill-feedface.committed'),
+      participantManifestPaths: [manifestPath],
+      journalPath: 'journal/2026-08-20.md',
+      journalStagedPath: '.memory-distill-feedface-global-journal.tmp',
+      journalBackupPath: '.memory-distill-feedface-global-journal.backup',
+      journalExisted: false,
+      notePaths: ['notes/uncommitted-deadbeef.md'],
+      noteStagedPaths: ['.memory-distill-feedface-note-0-deadbeef.tmp'],
+    })}\n`, 'utf8')
+    const p = distillProvider()
+    await p.listNotes(undefined, dir)
+    await expect(stat(join(dir, 'journal/2026-08-20.md'))).rejects.toMatchObject({ code: 'ENOENT' })
+    await p.dispose()
+  })
+
+  it('does not delete a pre-existing journal when its recovery backup is missing', async () => {
+    const dir = globalDir()
+    await mkdir(join(dir, 'journal'), { recursive: true })
+    await writeFile(join(dir, 'journal/2026-08-20.md'), 'only remaining journal bytes', 'utf8')
+    const manifestPath = join(dir, '.memory-distill-feedface.json')
+    await writeFile(manifestPath, `${JSON.stringify({
+      coordinatorPath: join(dir, '.memory-distill-feedface.committed'),
+      participantManifestPaths: [manifestPath],
+      journalPath: 'journal/2026-08-20.md',
+      journalStagedPath: '.memory-distill-feedface-global-journal.tmp',
+      journalBackupPath: '.memory-distill-feedface-global-journal.backup',
+      journalExisted: true,
+      notePaths: ['notes/uncommitted-deadbeef.md'],
+      noteStagedPaths: ['.memory-distill-feedface-note-0-deadbeef.tmp'],
+    })}\n`, 'utf8')
+    const p = distillProvider()
+    await expect(p.listNotes(undefined, dir)).rejects.toThrow('recovery backup is missing')
+    expect(await readFile(join(dir, 'journal/2026-08-20.md'), 'utf8')).toBe('only remaining journal bytes')
+    await p.dispose()
+  })
+
+  it('keeps a committed coordinator until the last participant recovers and removes orphan staging', async () => {
+    const coordinator = join(globalDir(), '.memory-distill-cafebabe.committed')
+    const manifests = [
+      join(projectDir(), '.memory-distill-cafebabe.json'),
+      join(globalDir(), '.memory-distill-cafebabe.json'),
+    ]
+    for (const [dir, manifestPath] of [[projectDir(), manifests[0]!], [globalDir(), manifests[1]!]] as const) {
+      await mkdir(join(dir, 'journal'), { recursive: true })
+      await writeFile(join(dir, 'journal/2026-08-20.md'), 'committed journal', 'utf8')
+      await writeFile(manifestPath, `${JSON.stringify({
+        coordinatorPath: coordinator,
+        participantManifestPaths: manifests,
+        journalPath: 'journal/2026-08-20.md',
+        journalStagedPath: `.memory-distill-cafebabe-${dir === projectDir() ? 'project' : 'global'}-journal.tmp`,
+        journalBackupPath: `.memory-distill-cafebabe-${dir === projectDir() ? 'project' : 'global'}-journal.backup`,
+        journalExisted: false,
+        notePaths: ['notes/recovered-deadbeef.md'],
+        noteStagedPaths: ['.memory-distill-cafebabe-note-0-deadbeef.tmp'],
+      })}\n`, 'utf8')
+    }
+    const marker = `${JSON.stringify({ transactionId: 'cafebabe', participantManifestPaths: manifests })}\n`
+    await writeFile(coordinator, marker, 'utf8')
+    await writeFile(join(projectDir(), '.memory-distill-deadbeef-orphan.tmp'), 'orphan', 'utf8')
+    await writeFile(join(projectDir(), '.memory-distill-deadbeef.json.tmp'), 'orphan', 'utf8')
+
+    const p = distillProvider()
+    await p.listNotes(undefined, projectDir())
+    expect(await readFile(coordinator, 'utf8')).toBe(marker)
+    await expect(stat(join(projectDir(), '.memory-distill-deadbeef-orphan.tmp'))).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(stat(join(projectDir(), '.memory-distill-deadbeef.json.tmp'))).rejects.toMatchObject({ code: 'ENOENT' })
+    await p.listNotes(undefined, globalDir())
+    await expect(stat(coordinator)).rejects.toMatchObject({ code: 'ENOENT' })
+    await p.dispose()
+  })
+
+  it('rejects a hostile recovery manifest without mutating vault files', async () => {
+    const dir = globalDir()
+    await mkdir(dir, { recursive: true })
+    await writeFile(join(dir, 'MEMORY.md'), 'must survive', 'utf8')
+    await writeFile(join(dir, '.memory-distill-bad0cafe.json'), `${JSON.stringify({
+      coordinatorPath: join(dir, '.memory-distill-bad0cafe.committed'),
+      participantManifestPaths: [join(dir, '.memory-distill-bad0cafe.json')],
+      journalPath: 'MEMORY.md',
+      journalStagedPath: '.memory-distill-bad0cafe-global-journal.tmp',
+      journalBackupPath: '.memory-distill-bad0cafe-global-journal.backup',
+      journalExisted: false,
+      notePaths: ['MEMORY.md'],
+      noteStagedPaths: ['.memory-distill-bad0cafe-note.tmp'],
+    })}\n`, 'utf8')
+
+    const p = distillProvider()
+    await expect(p.listNotes(undefined, dir)).rejects.toThrow('invalid recovery manifest')
+    expect(await readFile(join(dir, 'MEMORY.md'), 'utf8')).toBe('must survive')
+    await p.dispose()
+  })
+
+  it.each([
+    ['null payload', () => null],
+    ['missing coordinator', (_dir: string, value: Record<string, unknown>) => ({ ...value, coordinatorPath: undefined })],
+    ['non-boolean journal flag', (_dir: string, value: Record<string, unknown>) => ({ ...value, journalExisted: 'no' })],
+    ['wrong coordinator name', (dir: string, value: Record<string, unknown>) => ({ ...value, coordinatorPath: join(dir, 'wrong.committed') })],
+    ['missing participants', (_dir: string, value: Record<string, unknown>) => ({ ...value, participantManifestPaths: undefined })],
+    ['empty participants', (_dir: string, value: Record<string, unknown>) => ({ ...value, participantManifestPaths: [] })],
+    ['too many participants', (dir: string, value: Record<string, unknown>) => ({ ...value, participantManifestPaths: [1, 2, 3].map(index => join(dir, `p${index}`, '.memory-distill-feedface.json')) })],
+    ['relative participant', (_dir: string, value: Record<string, unknown>) => ({ ...value, participantManifestPaths: ['.memory-distill-feedface.json'] })],
+    ['wrong participant name', (dir: string, value: Record<string, unknown>) => ({ ...value, participantManifestPaths: [join(dir, 'wrong.json')] })],
+    ['duplicate participants', (dir: string, value: Record<string, unknown>) => ({ ...value, participantManifestPaths: [join(dir, '.memory-distill-feedface.json'), join(dir, '.memory-distill-feedface.json')] })],
+    ['current manifest absent', (dir: string, value: Record<string, unknown>) => ({ ...value, participantManifestPaths: [join(dir, 'peer', '.memory-distill-feedface.json')] })],
+    ['coordinator outside participants', (dir: string, value: Record<string, unknown>) => ({ ...value, coordinatorPath: join(dir, '..', '.memory-distill-feedface.committed') })],
+    ['missing note paths', (_dir: string, value: Record<string, unknown>) => ({ ...value, notePaths: undefined })],
+    ['missing staged paths', (_dir: string, value: Record<string, unknown>) => ({ ...value, noteStagedPaths: undefined })],
+    ['empty path lists', (_dir: string, value: Record<string, unknown>) => ({ ...value, notePaths: [], noteStagedPaths: [] })],
+    ['unequal path lists', (_dir: string, value: Record<string, unknown>) => ({ ...value, noteStagedPaths: [] })],
+    ['unsafe journal path', (_dir: string, value: Record<string, unknown>) => ({ ...value, journalPath: 'MEMORY.md' })],
+    ['unsafe journal stage', (_dir: string, value: Record<string, unknown>) => ({ ...value, journalStagedPath: 'stage.tmp' })],
+    ['unsafe journal backup', (_dir: string, value: Record<string, unknown>) => ({ ...value, journalBackupPath: 'backup' })],
+    ['non-string note path', (_dir: string, value: Record<string, unknown>) => ({ ...value, notePaths: [1] })],
+    ['non-string staged path', (_dir: string, value: Record<string, unknown>) => ({ ...value, noteStagedPaths: [1] })],
+    ['note without short id', (_dir: string, value: Record<string, unknown>) => ({ ...value, notePaths: ['notes/no-id.md'] })],
+    ['mismatched note stage', (_dir: string, value: Record<string, unknown>) => ({ ...value, noteStagedPaths: ['.memory-distill-feedface-ffffffff.tmp'] })],
+  ])('rejects invalid recovery metadata: %s', async (_label, mutate) => {
+    const dir = globalDir()
+    await mkdir(dir, { recursive: true })
+    await writeFile(join(dir, 'MEMORY.md'), 'must survive', 'utf8')
+    const manifestPath = join(dir, '.memory-distill-feedface.json')
+    const base: Record<string, unknown> = {
+      coordinatorPath: join(dir, '.memory-distill-feedface.committed'),
+      participantManifestPaths: [manifestPath],
+      journalPath: 'journal/2026-08-20.md',
+      journalStagedPath: '.memory-distill-feedface-global-journal.tmp',
+      journalBackupPath: '.memory-distill-feedface-global-journal.backup',
+      journalExisted: false,
+      notePaths: ['notes/safe-deadbeef.md'],
+      noteStagedPaths: ['.memory-distill-feedface-note-0-deadbeef.tmp'],
+    }
+    await writeFile(manifestPath, `${JSON.stringify(mutate(dir, base))}\n`, 'utf8')
+    const p = distillProvider()
+    await expect(p.listNotes(undefined, dir)).rejects.toThrow('invalid recovery manifest')
+    expect(await readFile(join(dir, 'MEMORY.md'), 'utf8')).toBe('must survive')
+    await p.dispose()
+  })
+
+  it('surfaces coordinator read faults without applying recovery metadata', async () => {
+    const dir = globalDir()
+    await mkdir(dir, { recursive: true })
+    const manifestPath = join(dir, '.memory-distill-feedface.json')
+    const coordinator = join(dir, '.memory-distill-feedface.committed')
+    await mkdir(coordinator)
+    await writeFile(manifestPath, `${JSON.stringify({
+      coordinatorPath: coordinator,
+      participantManifestPaths: [manifestPath],
+      journalPath: 'journal/2026-08-20.md',
+      journalStagedPath: '.memory-distill-feedface-global-journal.tmp',
+      journalBackupPath: '.memory-distill-feedface-global-journal.backup',
+      journalExisted: false,
+      notePaths: ['notes/safe-deadbeef.md'],
+      noteStagedPaths: ['.memory-distill-feedface-note-0-deadbeef.tmp'],
+    })}\n`, 'utf8')
+    const p = distillProvider()
+    expectFsErrorCode(await rejectionOf(p.listNotes(undefined, dir)))
+    await p.dispose()
+  })
+
+  it('rejects invalid local coordinator sweep markers and preserves live markers', async () => {
+    const dir = globalDir()
+    await mkdir(dir, { recursive: true })
+    const invalid = join(dir, '.memory-distill-deadbeef.committed')
+    await writeFile(invalid, 'null\n', 'utf8')
+    const p = distillProvider()
+    await expect(p.listNotes(undefined, dir)).rejects.toThrow('invalid coordinator marker')
+    await p.dispose()
+
+    await writeFile(invalid, `${JSON.stringify({ transactionId: 'wrong', participantManifestPaths: [] })}\n`, 'utf8')
+    const malformed = distillProvider()
+    await expect(malformed.listNotes(undefined, dir)).rejects.toThrow('invalid coordinator marker')
+    await malformed.dispose()
+
+    await rm(invalid, { force: true })
+    const peer = join(projectDir(), '.memory-distill-feedface.json')
+    const live = join(dir, '.memory-distill-feedface.committed')
+    await mkdir(projectDir(), { recursive: true })
+    await writeFile(peer, '{}\n', 'utf8')
+    await writeFile(live, `${JSON.stringify({ transactionId: 'feedface', participantManifestPaths: [peer] })}\n`, 'utf8')
+    const next = distillProvider()
+    await next.listNotes(undefined, dir)
+    expect(await readFile(live, 'utf8')).toContain('feedface')
+    await next.dispose()
+  })
+
+  it.each([
+    ['null marker', () => null],
+    ['wrong transaction', (participants: string[]) => ({ transactionId: 'deadbeef', participantManifestPaths: participants })],
+    ['missing participants', () => ({ transactionId: 'feedface' })],
+    ['wrong participant count', () => ({ transactionId: 'feedface', participantManifestPaths: [] })],
+    ['different participant', (participants: string[]) => ({ transactionId: 'feedface', participantManifestPaths: [participants[0]!.replace('feedface', 'deadbeef')] })],
+  ])('rejects an invalid coordinator without applying its manifest: %s', async (_label, markerFactory) => {
+    const dir = globalDir()
+    await mkdir(dir, { recursive: true })
+    await writeFile(join(dir, 'MEMORY.md'), 'must survive', 'utf8')
+    const manifestPath = join(dir, '.memory-distill-feedface.json')
+    const participants = [manifestPath]
+    const coordinator = join(dir, '.memory-distill-feedface.committed')
+    await writeFile(manifestPath, `${JSON.stringify({
+      coordinatorPath: coordinator,
+      participantManifestPaths: participants,
+      journalPath: 'journal/2026-08-20.md',
+      journalStagedPath: '.memory-distill-feedface-global-journal.tmp',
+      journalBackupPath: '.memory-distill-feedface-global-journal.backup',
+      journalExisted: false,
+      notePaths: ['notes/safe-deadbeef.md'],
+      noteStagedPaths: ['.memory-distill-feedface-note-0-deadbeef.tmp'],
+    })}\n`, 'utf8')
+    await writeFile(coordinator, `${JSON.stringify(markerFactory(participants))}\n`, 'utf8')
+    const p = distillProvider()
+    await expect(p.listNotes(undefined, dir)).rejects.toThrow('invalid distillation coordinator marker')
+    expect(await readFile(join(dir, 'MEMORY.md'), 'utf8')).toBe('must survive')
+    await p.dispose()
+  })
+})
+
+describe('LocalMemoryProvider delete', () => {
+  it('soft-deletes into the sibling trash folder and drops the index rows', async () => {
+    const p = provider(false)
+    const written = await p.write(input(), globalDir())
+    const result = await p.delete(written.id, globalDir())
+    expect(result).toMatchObject({
+      id: written.id,
+      title: 'My note',
+      path: 'notes/my-note.md',
+    })
+    expect(result.trashPath).toContain(join(root, 'home', 'memory-trash'))
+    expect(basename(result.trashPath!)).toMatch(/^my-note\.\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{3}Z\.md$/)
+    await expect(p.read(written.id, [globalDir()])).rejects.toMatchObject({ code: 'NOT_FOUND' })
+    expect(await p.search('vitest', undefined, [globalDir()])).toEqual([])
+    expect(await readFile(result.trashPath!, 'utf8')).toContain('Body about vitest.')
+    await p.dispose()
+  })
+
+  it('drops inbound link rows with the note; rebuilt survivors dangle', async () => {
+    const p = provider(false)
+    const a = await p.write(input({ title: 'A', content: 'Links [[B]].' }), globalDir())
+    const b = await p.write(input({ title: 'B' }), globalDir())
+    const before = await p.traverse(a.id, undefined, [globalDir()])
+    expect(before.nodes).toEqual([{ id: b.id, title: 'B', via: { kind: 'wikilink', direction: 'out' } }])
+
+    await p.delete(b.id, globalDir())
+    const after = await p.traverse(a.id, undefined, [globalDir()])
+    expect(after.nodes).toEqual([])
+
+    // Rebuilding A re-indexes its body, whose [[B]] now dangles.
+    await p.write(input({ id: a.id, title: 'A', content: 'Links [[B]].' }), globalDir())
+    const rebuilt = await p.traverse(a.id, undefined, [globalDir()])
+    expect(rebuilt.nodes).toEqual([{ title: 'B', via: { kind: 'wikilink', direction: 'out' } }])
+    await p.dispose()
+  })
+
+  it('deletes by exact title; permanent mode removes the file without a trash copy', async () => {
+    const p = provider(false)
+    const written = await p.write(input({ title: 'Doomed' }), globalDir())
+    const result = await p.delete('Doomed', globalDir(), undefined, { mode: 'permanent' })
+    expect(result).toEqual({ id: written.id, title: 'Doomed', path: 'notes/doomed.md' })
+    await expect(stat(join(root, 'home', 'memory-trash'))).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(p.read(written.id, [globalDir()])).rejects.toMatchObject({ code: 'NOT_FOUND' })
+    await p.dispose()
+  })
+
+  it('suffixes a colliding trash name instead of overwriting', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-19T07:30:00.123Z'))
+    try {
+      const p = provider(false)
+      const written = await p.write(input({ title: 'Keep' }), globalDir())
+      const trashNotes = join(root, 'home', 'memory-trash', 'notes')
+      await mkdir(trashNotes, { recursive: true })
+      await writeFile(join(trashNotes, 'keep.2026-08-19T07-30-00.123Z.md'), 'collision', 'utf8')
+
+      const result = await p.delete(written.id, globalDir())
+      expect(result.trashPath!.endsWith('keep.2026-08-19T07-30-00.123Z-2.md')).toBe(true)
+      expect(await readFile(result.trashPath!, 'utf8')).toContain('Body about vitest.')
+      expect(await readFile(join(trashNotes, 'keep.2026-08-19T07-30-00.123Z.md'), 'utf8')).toBe('collision')
+      await p.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('reports a vanished source file as undeleted-move instead of failing', async () => {
+    const p = provider(false)
+    const written = await p.write(input(), globalDir())
+    const first = await moveToTrash(join(globalDir(), written.path), globalDir(), written.path)
+    expect(first).toBeDefined()
+    await expect(moveToTrash(join(globalDir(), written.path), globalDir(), written.path)).resolves.toBeUndefined()
+    await p.dispose()
+  })
+
+  it('rejects deleting an unknown note', async () => {
+    const p = provider(false)
+    await expect(p.delete('missing', globalDir())).rejects.toMatchObject({ code: 'NOT_FOUND' })
+    await p.dispose()
+  })
+})
+
+describe('extractWikiLinks', () => {
+  it('extracts plain and aliased wikilinks, skipping empties', () => {
+    expect(extractWikiLinks('[[a]] and [[b|alias]] and [[ ]]')).toEqual(['a', 'b'])
+    expect(extractWikiLinks('no links')).toEqual([])
+  })
+})
