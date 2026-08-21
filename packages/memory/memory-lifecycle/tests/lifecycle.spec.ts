@@ -1,15 +1,19 @@
 import { Context } from '@deepseek-ai/cordis'
 import { emitAgentEvent, Inbox } from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import CommandRuntime from '@deepseek-ai/dsh-commands'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import type { UserMessage } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, UserMessage } from '@deepseek-ai/dsh-llm'
 import { MemoryError } from '@deepseek-ai/dsh-memory'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import type { Session as SessionType } from '@deepseek-ai/dsh-session'
 import SessionStore from '@deepseek-ai/dsh-session'
+import { SettingsProvider, settingsNamespace } from '@deepseek-ai/dsh-settings'
+import type { SettingsNamespace } from '@deepseek-ai/dsh-settings'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import { describe, expect, it, vi } from 'vitest'
 import { apply, inject, name } from '../src/index.ts'
+import { CONCISE_INSTRUCTION, DETAILED_INSTRUCTION } from '../src/distill.ts'
 
 const GLOBAL_DIR = 'C:/vaults/global'
 
@@ -50,7 +54,7 @@ function fakeMemory(overrides: Record<string, unknown> = {}) {
   return {
     resolveScopes: vi.fn(async () => ['global']),
     readPersona: vi.fn(async () => ({ dir: GLOBAL_DIR, path: 'MEMORY.md', text: 'Global persona text.' })),
-    recent: vi.fn(async () => ({ dir: 'C:/vaults/project', notes: [] })),
+    list: vi.fn(async () => ({ dir: 'C:/vaults/global', scope: 'global', notes: [] })),
     readInScope: vi.fn(async () => {
       throw new MemoryError('no match', 'NOT_FOUND')
     }),
@@ -63,29 +67,56 @@ function fakeMemory(overrides: Record<string, unknown> = {}) {
       updated: 'u',
     })),
     appendJournal: vi.fn(async () => ({ path: 'journal/2026-08-18.md', date: '2026-08-18' })),
+    commitDistill: vi.fn(async (groups: Array<{
+      scope: 'project' | 'global'
+      date: string
+      journalTitle: string
+      notes: Array<{ title: string }>
+    }>) => ({
+      notes: groups.flatMap(group => group.notes.map((note, index) => {
+        const shortId = (index + 1).toString(16).padStart(8, '0')
+        return {
+          id: `${group.scope}-${index}`,
+          scope: group.scope,
+          title: note.title,
+          path: `notes/${note.title.toLowerCase().replaceAll(' ', '-')}-${shortId}.md`,
+          created: 'c',
+          updated: 'u',
+          journalAnchor: `^memory-a1b2c3d4-${group.scope}`,
+        }
+      })),
+      journals: groups.map(group => ({
+        scope: group.scope,
+        path: `journal/${group.date}.md`,
+        date: group.date,
+        title: group.journalTitle,
+        anchor: `^memory-a1b2c3d4-${group.scope}`,
+      })),
+    })),
     ...overrides,
   }
 }
 
-/** Scripted auxiliary LLM yielding one distillation JSON reply. */
-function fakeLlm() {
-  return {
-    stream: vi.fn(async function* () {
-      yield { type: 'block-start' as const, index: 0, blockType: 'text' as const }
-      yield {
-        type: 'block-end' as const,
-        index: 0,
-        block: {
-          type: 'text' as const,
-          text: JSON.stringify({
-            notes: [{ scope: 'global', title: 'Learned fact', content: 'A new durable fact.', tags: [], related: [] }],
-            journal: { title: 'Turn summary', body: '- Did work touching [[Learned fact]].' },
-          }),
-        },
-      }
-      yield { type: 'finish' as const, reason: { kind: 'stop' as const } }
-    }),
-  }
+/** Scripted auxiliary LLM yielding one distillation JSON reply per call. */
+function fakeLlm(reply?: string) {
+  const captured: GenerateOptions[] = []
+  const stream = vi.fn(async function* (options: GenerateOptions) {
+    captured.push(options)
+    yield { type: 'block-start' as const, index: 0, blockType: 'text' as const }
+    yield {
+      type: 'block-end' as const,
+      index: 0,
+      block: {
+        type: 'text' as const,
+        text: reply ?? JSON.stringify({
+          notes: [{ scope: 'global', title: 'Learned fact', content: 'A new durable fact.', tags: [], related: [] }],
+          journal: { title: 'Turn summary', body: '- Did work touching [[Learned fact]].' },
+        }),
+      },
+    }
+    yield { type: 'finish' as const, reason: { kind: 'stop' as const } }
+  })
+  return { captured, stream }
 }
 
 async function harness(
@@ -207,19 +238,19 @@ describe('memory-lifecycle plugin', () => {
 
     await vi.waitFor(() => { expect(session.events.some(event => event.type === 'memory/distill')).toBe(true) })
 
-    expect(memory.write).toHaveBeenCalledWith(expect.objectContaining({
-      scope: 'global', title: 'Learned fact', content: 'A new durable fact.',
-    }), undefined)
-    expect(memory.appendJournal).toHaveBeenCalledWith(expect.objectContaining({
-      scope: 'global', title: 'Turn summary',
-    }), undefined)
+    expect(memory.commitDistill).toHaveBeenCalledWith([
+      expect.objectContaining({
+        scope: 'global', journalTitle: 'Turn summary',
+        notes: [expect.objectContaining({ title: 'Learned fact', content: 'A new durable fact.' })],
+      }),
+    ], undefined, expect.any(AbortSignal))
 
     const distill = session.events.findLast(event => event.type === 'memory/distill')
     expect(distill?.type === 'memory/distill' && distill.data).toMatchObject({
       turn: 1,
       model: { provider: 'deepseek', model: 'main-model' },
-      notes: [{ action: 'create', scope: 'global', title: 'Learned fact' }],
-      journal: { scope: 'global', path: 'journal/2026-08-18.md' },
+      notes: [{ scope: 'global', title: 'Learned fact' }],
+      journals: [{ scope: 'global' }],
     })
     expect(distill?.type === 'memory/distill' && distill.data.turn).toBe(end.data.turn)
     await ctx.fiber.dispose()
@@ -263,7 +294,7 @@ describe('memory-lifecycle plugin', () => {
     await new Promise(resolve => setTimeout(resolve, 0))
 
     expect(agent.injected).toHaveLength(1)
-    expect(memory.write).not.toHaveBeenCalled()
+    expect(memory.commitDistill).not.toHaveBeenCalled()
     expect(session.events.some(event => event.type === 'memory/distill')).toBe(false)
     await ctx.fiber.dispose()
   })
@@ -272,7 +303,7 @@ describe('memory-lifecycle plugin', () => {
     const { ctx } = await harness({}, {
       memory: {
         readPersona: vi.fn(async () => undefined),
-        recent: vi.fn(async () => ({ dir: 'C:/vaults/project', notes: [] })),
+        list: vi.fn(async () => ({ dir: 'C:/vaults/global', scope: 'global', notes: [] })),
       },
     })
     const session = createSession('empty-agent')
@@ -367,7 +398,7 @@ describe('memory-lifecycle plugin', () => {
     let atGate = false
     const { ctx, fiber } = await harness({}, {
       memory: {
-        appendJournal: vi.fn(async () => {
+        commitDistill: vi.fn(async () => {
           atGate = true
           await gate
           throw new Error('late failure')
@@ -390,6 +421,184 @@ describe('memory-lifecycle plugin', () => {
     release()
     await disposal
     expect(session.events.some(event => event.type === 'memory/distill')).toBe(false)
+    await ctx.fiber.dispose()
+  })
+})
+
+/** In-memory settings provider fixture: the smallest real subclass. */
+class MemorySettingsFixture extends SettingsProvider {
+  doc: Record<string, unknown> = {}
+
+  get writable(): boolean {
+    return true
+  }
+
+  protected load(): Promise<Record<string, unknown>> {
+    return Promise.resolve(structuredClone(this.doc))
+  }
+
+  protected persist(ns: SettingsNamespace, section: Record<string, unknown>): Promise<void> {
+    this.doc[ns] = structuredClone(section)
+    return Promise.resolve()
+  }
+}
+
+describe('memory-lifecycle settings and review command', () => {
+  /** Boot with a real settings provider so the namespace host half resolves. */
+  async function settingsHarness(config: Record<string, unknown> = {}) {
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(MemorySettingsFixture)
+    const memory = fakeMemory()
+    const llm = fakeLlm()
+    ctx.provide('memory', memory)
+    ctx.provide('llm', llm)
+    const fiber = ctx.plugin({ name, inject, apply }, config)
+    await fiber
+    return { ctx, memory, llm, fiber }
+  }
+
+  async function distillTurn(session: SessionType, turn: number, llm: { captured: GenerateOptions[] }): Promise<void> {
+    session.append('turn/start', { turn })
+    session.append('request/header', { header: { config: { provider: 'deepseek', model: 'main-model' } }, reason: 'initial' })
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: `Turn ${turn} with enough characters to pass the minimum distillation gate.` }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    session.append('turn/end', { turn, reason: { kind: 'completed' } })
+    await vi.waitFor(() => { expect(session.events.filter(event => event.type === 'memory/distill')).toHaveLength(turn) })
+    expect(llm.captured).toHaveLength(turn)
+  }
+
+  it('registers the memory-lifecycle settings namespace and applies card changes live', async () => {
+    const { ctx, llm } = await settingsHarness({ distillMode: 'concise' })
+    const warns: string[] = []
+    vi.spyOn(ctx.logger, 'warn').mockImplementation((...args: unknown[]) => { warns.push(args.map(String).join(' ')) })
+    const session = createSession('live-config')
+    ctx.sessions.enter(session)
+
+    await distillTurn(session, 1, llm)
+    expect(warns).toEqual([])
+    expect(llm.captured[0]!.messages.at(-1)?.content[0]).toMatchObject({ type: 'text', text: CONCISE_INSTRUCTION })
+
+    await ctx.settings.update(settingsNamespace('memory-lifecycle'), { distillMode: 'detailed' })
+    await distillTurn(session, 2, llm)
+    expect(llm.captured[1]!.messages.at(-1)?.content[0]).toMatchObject({ type: 'text', text: DETAILED_INSTRUCTION })
+    await ctx.fiber.dispose()
+  })
+
+  it('keeps the composition entry as the config source without a settings service', async () => {
+    const { ctx, llm } = await harness({ distillMode: 'detailed' }) as { ctx: Context; llm: { captured: GenerateOptions[] } }
+    const session = createSession('no-settings-config')
+    ctx.sessions.enter(session)
+
+    session.append('turn/start', { turn: 1 })
+    session.append('request/header', { header: { config: { provider: 'deepseek', model: 'main-model' } }, reason: 'initial' })
+    session.append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'A turn long enough to pass the minimum distillation gate.' }],
+      source: { kind: 'user' },
+    }), { surfaceOp: 'append' })
+    session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+
+    await vi.waitFor(() => { expect(llm.captured).toHaveLength(1) })
+    expect(llm.captured[0]!.messages.at(-1)?.content[0]).toMatchObject({ type: 'text', text: DETAILED_INSTRUCTION })
+    await ctx.fiber.dispose()
+  })
+
+  async function reviewHarness(
+    memoryOverrides: Record<string, unknown> = {},
+    reply = '{"candidates":[]}',
+    options: { throwString?: boolean } = {},
+  ) {
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt)
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(CommandRuntime)
+    const memory = fakeMemory({
+      resolveScopes: vi.fn(async () => ['project', 'global']),
+      list: vi.fn(async () => ({
+        dir: 'C:/vaults/project',
+        scope: 'project',
+        notes: [{ id: 'p1', path: 'notes/coffee.md', title: 'Coffee preference', tags: [], updated: 1, excerpt: 'Prefers green tea.', persona: false }],
+      })),
+      ...memoryOverrides,
+    })
+    const llm = options.throwString === true
+      ? { captured: [], stream: vi.fn(async function* () { throw 'provider exploded' }) }
+      : fakeLlm(reply)
+    ctx.provide('memory', memory)
+    ctx.provide('llm', llm)
+    const fiber = ctx.plugin({ name, inject, apply }, {})
+    await fiber
+    return { ctx, memory, llm, fiber }
+  }
+
+  it('registers the /memory-review command and removes it on disposal', async () => {
+    const { ctx, fiber } = await reviewHarness()
+    const agent = fakeAgent(ctx, createSession('review-command', 'C:/work/proj'))
+    expect(ctx.commands.find(agent, 'memory-review')?.description).toContain('promote')
+    await fiber.dispose()
+    expect(ctx.commands.find(agent, 'memory-review')).toBeUndefined()
+    await ctx.fiber.dispose()
+  })
+
+  it('runs the review flow and points at the memory/review event', async () => {
+    const { ctx } = await reviewHarness({}, '{"candidates":[{"id":"p1","reason":"User-wide preference."}]}')
+    const session = createSession('review-flow', 'C:/work/proj')
+    session.append('request/header', { header: { config: { provider: 'deepseek', model: 'main-model' } }, reason: 'initial' })
+    const agent = fakeAgent(ctx, session)
+
+    const execution = await ctx.commands.execute(agent, '/memory-review', new AbortController().signal)
+    expect(execution?.result).toMatchObject({ kind: 'success' })
+
+    const review = session.events.findLast(event => event.type === 'memory/review')
+    expect(review?.type === 'memory/review' && review.data).toMatchObject({
+      candidates: [{ id: 'p1', title: 'Coffee preference', snippet: 'Prefers green tea.', reason: 'User-wide preference.' }],
+    })
+    expect(execution?.result.kind === 'success' && execution.result.sourceEventSeq).toBe(review?.seq)
+    await ctx.fiber.dispose()
+  })
+
+  it('rejects arguments and global-only sessions with clear error text', async () => {
+    const argsCtx = await reviewHarness()
+    const argsAgent = fakeAgent(argsCtx.ctx, createSession('review-args', 'C:/work/proj'))
+    const withArgs = await argsCtx.ctx.commands.execute(argsAgent, '/memory-review extra', new AbortController().signal)
+    expect(withArgs?.result).toEqual({ kind: 'error', text: 'The /memory-review command takes no arguments.' })
+    expect(argsCtx.llm.stream).not.toHaveBeenCalled()
+    await argsCtx.ctx.fiber.dispose()
+
+    const globalCtx = await reviewHarness({ resolveScopes: vi.fn(async () => ['global']) })
+    const globalAgent = fakeAgent(globalCtx.ctx, createSession('review-global', undefined))
+    const globalOnly = await globalCtx.ctx.commands.execute(globalAgent, '/memory-review', new AbortController().signal)
+    expect(globalOnly?.result.kind).toBe('error')
+    expect(globalOnly?.result.kind === 'error' && globalOnly.result.text).toContain('needs a project workspace')
+    expect(globalCtx.llm.stream).not.toHaveBeenCalled()
+    await globalCtx.ctx.fiber.dispose()
+  })
+
+  it('settles a review failure as an error result without an event', async () => {
+    const { ctx } = await reviewHarness({}, '{"candidates":[{"id":"ghost","reason":"Unknown."}]}')
+    const session = createSession('review-failure', 'C:/work/proj')
+    session.append('request/header', { header: { config: { provider: 'deepseek', model: 'main-model' } }, reason: 'initial' })
+    const agent = fakeAgent(ctx, session)
+
+    const execution = await ctx.commands.execute(agent, '/memory-review', new AbortController().signal)
+    expect(execution?.result.kind).toBe('error')
+    expect(execution?.result.kind === 'error' && execution.result.text).toContain('unknown note id')
+    expect(session.events.some(event => event.type === 'memory/review')).toBe(false)
+    await ctx.fiber.dispose()
+  })
+
+  it('renders a non-Error review failure through its string coercion', async () => {
+    const { ctx } = await reviewHarness({}, 'unused', { throwString: true })
+    const session = createSession('review-string-failure', 'C:/work/proj')
+    session.append('request/header', { header: { config: { provider: 'deepseek', model: 'main-model' } }, reason: 'initial' })
+    const agent = fakeAgent(ctx, session)
+
+    const execution = await ctx.commands.execute(agent, '/memory-review', new AbortController().signal)
+    expect(execution?.result).toEqual({ kind: 'error', text: 'provider exploded' })
+    expect(session.events.some(event => event.type === 'memory/review')).toBe(false)
     await ctx.fiber.dispose()
   })
 })

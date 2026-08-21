@@ -2,7 +2,7 @@
 
 [English](memory.md) | 中文
 
-Memory 是第一方、默认关闭的跨会话记忆能力：两个 Obsidian 兼容的 markdown vault（一个全局、一个每项目），配派生的 SQLite 全文/链接索引、四个面向模型的工具与一套自动生命周期——会话开始上下文注入，加每回合蒸馏进主题笔记与关联的日记。子系统由 `packages/memory/` 下的四个包组成——`dsh-memory` 服务、`dsh-memory-local` 文件优先提供方、`dsh-tool-memory` 模型工具与 `dsh-memory-lifecycle` 自动化消费者。设计、分期与被否决的替代方案见[第一方记忆 Agent Note](../../.agents/notes/proposed/feature/2026-08-18-first-party-pluggable-memory.md)；包配置见各包 README。
+Memory 是第一方、默认关闭的跨会话记忆能力：两个 Obsidian 兼容的 markdown vault（一个全局、一个每项目），配派生的 SQLite 全文/链接索引、五个面向模型的工具、一套自动生命周期——会话开始上下文注入，加每回合蒸馏进主题笔记与关联的日记——一个面向浏览器的远端传输，以及 `/memory-review` 升级流程。子系统由 `packages/memory/` 下的五个包组成——`dsh-memory` 服务、`dsh-memory-local` 文件优先提供方、`dsh-tool-memory` 模型工具、`dsh-memory-lifecycle` 自动化消费者与 `dsh-memory-remote` web 传输。设计、分期与被否决的替代方案见[第一方记忆 Agent Note](../../.agents/notes/proposed/feature/2026-08-18-first-party-pluggable-memory.md)；包配置见各包 README。
 
 Source: [`packages/memory/memory/src/types.ts`](../../packages/memory/memory/src/types.ts)
 
@@ -12,15 +12,15 @@ Source: [`packages/memory/memory/src/types.ts`](../../packages/memory/memory/src
 
 ## Notes and journal
 
-提供方写入的笔记是带 frontmatter（`id`、`scope`、`title`、`created`、`updated`、`tags`、`related`）加正文的 markdown；正文中的 `[[wikilinks]]` 与 frontmatter 的 `related` 标题成为带类型的链接行（`wikilink`/`related`），可双向查询。没有该 frontmatter 的文件以确定的 `adopted:<path>` 身份被收养——任何已存在的 markdown 文件夹都成为可搜索的记忆。`memory_write` 按 `id` 原地替换并保留 `created`；文件名在创建时由标题派生且稳定不变。`appendJournal` 在提供方的独占链上向当天的 `journal/YYYY-MM-DD.md` 追加一条 `## heading` 条目；文件不存在时以 `type: journal` frontmatter 创建。
+提供方写入的笔记是带 frontmatter（`id`、`scope`、`title`、`created`、`updated`、`tags`、`related`）加正文的 markdown；正文中的 `[[wikilinks]]` 与 frontmatter 的 `related` 标题成为带类型的链接行（`wikilink`/`related`），可双向查询。没有该 frontmatter 的文件以确定的 `adopted:<path>` 身份被收养——任何已存在的 markdown 文件夹都成为可搜索的记忆。`memory_write` 按 `id` 原地替换并保留 `created`；文件名在创建时由标题派生且稳定不变。`appendJournal` 在提供方的独占链上向当天的 `journal/YYYY-MM-DD.md` 追加一条 `## heading` 条目；文件不存在时以 `type: journal` frontmatter 创建。删除是软删除：文件移入 vault 外的同级 `memory-trash/` 文件夹，文件名带时间戳，索引清除笔记行与每条入向链接行，存留的 wikilink 在下次重建时悬空。升级流程改为彻底移除项目文件，因为内容已写入全局 vault。
 
 ## The service surface
 
-`ctx.memory` 是唯一提供方 seam：`register()` 只接受一个提供方，`resolveScopes(cwd)` 拥有作用域解析，`write`/`read`/`search`/`traverse` 以显式 vault 目录路由到提供方；`readInScope`、`readPersona`、`recent` 与 `appendJournal` 服务生命周期消费者。失败使用 `MemoryError`，错误码为 `DUPLICATE_PROVIDER`、`NO_PROVIDER`、`NO_PROJECT_SCOPE` 与 `NOT_FOUND`。提供方在每次 watcher 驱动的 vault 对账后发出 `memory/change`；生命周期消费者为每次注入的上下文落 `memory/inject`、为每次蒸馏写入记录落 `memory/distill`，使面向模型的注入与每次静默变更都能从会话日志重建。
+`ctx.memory` 是唯一提供方 seam：`register()` 只接受一个提供方，`resolveScopes(cwd)` 拥有作用域解析，`write`/`read`/`search`/`traverse` 以显式 vault 目录路由到提供方；`readInScope`、`readPersona`、`recent` 与 `appendJournal` 服务生命周期消费者，而 `list`、`searchInScope`、`delete` 与 `info` 服务面板及其远端传输。失败使用 `MemoryError`，错误码为 `DUPLICATE_PROVIDER`、`NO_PROVIDER`、`NO_PROJECT_SCOPE` 与 `NOT_FOUND`。提供方在每次 watcher 驱动的 vault 对账后发出 `memory/change`；生命周期消费者为每次注入的上下文落 `memory/inject`、为每次蒸馏写入记录落 `memory/distill`、为每次升级提议落 `memory/review`，使面向模型的注入与每次静默变更都能从会话日志重建。
 
 ## Consumers
 
-`dsh-tool-memory` 注册四个模型工具。`dsh-memory-lifecycle` 在 `agent/session-start` 时注入两份人设笔记外加字节封顶的项目主题笔记近期窗口，在已加载文件变更时重载，通过一次缓存复用的辅助调用蒸馏每个完成的回合（候选按 `project`/`global` 分类、合并而非重述），追加该回合的日记条目，并注册一段简短引导 section，告诉模型何时查阅、何时显式写入记忆。
+`dsh-tool-memory` 注册五个模型工具；删除先经审批 seam 询问。`dsh-memory-lifecycle` 在 `agent/session-start` 时注入两份人设笔记全文外加字节封顶的笔记目录（标题、tags、更新日期、首行摘录），在已加载文件变更时重载，通过一次缓存复用的辅助调用蒸馏每个完成的回合（其指令由 `distillMode` 设置选定；候选按 `project`/`global` 分类、合并而非重述），追加该回合的日记条目，注册一段简短引导 section，告诉模型何时查阅、何时显式写入记忆，并运行 `/memory-review` 升级流程。`dsh-memory-remote` 服务浏览器：会话无关的 `memory` 命名空间（项目 vault 经显式 `workspaceDir` 的面板操作）与会话寻址的 `memoryReview.decide`，后者依据活跃会话日志校验并以写优先升级被接受的笔记。
 
 <!-- BEGIN GENERATED cordis-surface (gen-cordis-catalog.ts) — do not edit between markers -->
 
@@ -140,9 +140,69 @@ async recent( opts: MemoryRecentOptions | undefined, cwd: string | undefined, si
  * @returns the committed journal file reference.
  */
 async appendJournal( input: MemoryJournalAppendInput, cwd: string | undefined, signal?: AbortSignal, ): Promise<MemoryJournalAppendResult>
+
+/**
+ * Atomically create one whole turn's distilled nodes and one journal entry
+ * per participating scope. The provider owns staging, rollback, indexing,
+ * and post-commit verification inside the resolved vault directories.
+ * `scope: 'project'` requires the caller's cwd to resolve to a registered
+ * workspace.
+ * @param groups - non-empty scope-local node and journal groups.
+ * @param cwd - caller session working directory.
+ * @param signal - caller cancellation.
+ * @returns the verified committed node and journal references.
+ */
+async commitDistill( groups: readonly MemoryDistillCommitGroupInput[], cwd: string | undefined, signal?: AbortSignal, ): Promise<MemoryDistillCommitResult>
+
+/**
+ * Read-only service facts for settings surfaces: the configured global
+ * vault directory.
+ * @returns the global vault directory.
+ */
+info(): MemoryInfo
+
+/**
+ * One vault's listable note rows: the persona file plus `notes/` notes,
+ * journal excluded, `updated` descending with the persona pinned first.
+ * `scope: 'project'` requires the caller's cwd to resolve to a registered
+ * workspace.
+ * @param scope - which single vault to list.
+ * @param cwd - caller session working directory.
+ * @param opts - optional row cap, bounded above by provider config.
+ * @param signal - caller cancellation.
+ * @returns the vault directory, scope, and its listable rows.
+ */
+async list( scope: MemoryScope, cwd: string | undefined, opts?: MemoryListOptions, signal?: AbortSignal, ): Promise<MemoryListResult>
+
+/**
+ * Ranked full-text search within one explicit vault, skipping the chain.
+ * Used by per-tab surfaces that search exactly the vault they list.
+ * @param query - FTS query terms.
+ * @param opts - optional limit, bounded above by provider config.
+ * @param scope - the single vault to search.
+ * @param cwd - caller session working directory.
+ * @param signal - caller cancellation.
+ * @returns ranked hits with snippets and tags.
+ */
+async searchInScope( query: string, opts: MemorySearchOptions | undefined, scope: MemoryScope, cwd: string | undefined, signal?: AbortSignal, ): Promise<MemorySearchHit[]>
+
+/**
+ * Delete one note by id or exact title. Without an explicit scope the note
+ * resolves across the caller's scope chain, project first; with one, only
+ * that vault is searched. Deletion is soft by default: the provider moves
+ * the file to the sibling trash folder and drops the index rows plus every
+ * inbound link row, leaving surviving wikilinks to dangle.
+ * @param ref - note id or exact title.
+ * @param scope - optional single vault to resolve within.
+ * @param cwd - caller session working directory.
+ * @param signal - caller cancellation.
+ * @param opts - optional deletion mode; `permanent` removes the file outright.
+ * @returns the deleted note reference and the trash path when moved.
+ */
+async delete( ref: string, scope: MemoryScope | undefined, cwd: string | undefined, signal?: AbortSignal, opts?: MemoryDeleteOptions, ): Promise<MemoryDeleteResult>
 ```
 
-Source: [`packages/memory/memory/src/index.ts:118`](../../packages/memory/memory/src/index.ts)
+Source: [`packages/memory/memory/src/index.ts:124`](../../packages/memory/memory/src/index.ts)
 
 <a id="memory-events"></a>
 
@@ -159,12 +219,11 @@ The registered provider finished a watcher-driven reconciliation of one vault di
  * The registered provider finished a watcher-driven reconciliation of one
  * vault directory. Consumers tracking injected context compare the changed
  * files against what they loaded.
- * @param payload.dir - absolute vault directory that changed.
- * @param payload.paths - changed markdown file paths relative to the vault root.
  * @mode emit
+ * @param payload - vault directory and the changed files relative to it.
  */
 'memory/change'(payload: { dir: string; paths: string[] }): void
 ```
 
-Source: [`packages/memory/memory/src/index.ts:68`](../../packages/memory/memory/src/index.ts)
+Source: [`packages/memory/memory/src/types.ts:299`](../../packages/memory/memory/src/types.ts)
 <!-- END GENERATED cordis-surface -->

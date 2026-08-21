@@ -28,7 +28,7 @@ function agentWithCwd(cwd: string | undefined): Agent {
   return { id: SessionId('tool-parent'), session } as unknown as Agent
 }
 
-type ProviderSpies = Pick<MemoryProvider, 'write' | 'read' | 'search' | 'traverse' | 'readPersona' | 'recentNotes' | 'appendJournal'>
+type ProviderSpies = Pick<MemoryProvider, 'write' | 'read' | 'search' | 'traverse' | 'readPersona' | 'recentNotes' | 'appendJournal' | 'commitDistill' | 'listNotes' | 'delete'>
 
 function fakeProvider(): ProviderSpies & { provider: MemoryProvider } {
   const note: MemoryNote = {
@@ -38,6 +38,7 @@ function fakeProvider(): ProviderSpies & { provider: MemoryProvider } {
     path: 'notes/a-note.md',
     tags: ['t'],
     body: 'body',
+    updated: 1,
     related: [{ id: MemoryNoteId('n2'), title: 'Other' }],
     backlinks: [{ id: MemoryNoteId('n3'), title: 'Source' }],
   }
@@ -61,9 +62,12 @@ function fakeProvider(): ProviderSpies & { provider: MemoryProvider } {
   const readPersona = vi.fn(async () => ({ path: 'MEMORY.md', text: 'persona' }))
   const recentNotes = vi.fn(async () => [])
   const appendJournal = vi.fn(async () => ({ path: 'journal/2026-08-18.md', date: '2026-08-18' }))
+  const commitDistill = vi.fn(async () => { throw new Error('unused in tool-memory tests') })
+  const listNotes = vi.fn(async () => [])
+  const del = vi.fn(async () => ({ id: MemoryNoteId('n1'), title: 'A note', path: 'notes/a-note.md', trashPath: join(GLOBAL_DIR, 'memory-trash', 'notes', 'a-note.md') }))
   return {
-    provider: { write, read, search, traverse, readPersona, recentNotes, appendJournal },
-    write, read, search, traverse, readPersona, recentNotes, appendJournal,
+    provider: { write, read, search, traverse, readPersona, recentNotes, appendJournal, commitDistill, listNotes, delete: del },
+    write, read, search, traverse, readPersona, recentNotes, appendJournal, commitDistill, listNotes, delete: del,
   }
 }
 
@@ -100,13 +104,14 @@ function call(ctx: Context, name: string, args: unknown, cwd?: string) {
 }
 
 describe('tool-memory registration', () => {
-  it('registers the four memory tools on the shared registry', async () => {
+  it('registers the five memory tools on the shared registry', async () => {
     const ctx = await setup()
     const names = ctx.tools.schemas().map(schema => schema.name)
     expect(names).toContain('memory_write')
     expect(names).toContain('memory_read')
     expect(names).toContain('memory_search')
     expect(names).toContain('memory_traverse')
+    expect(names).toContain('memory_delete')
     await ctx.fiber.dispose()
   })
 
@@ -192,6 +197,102 @@ describe('memory_write', () => {
   })
 })
 
+describe('memory_delete', () => {
+  it('delegates an approved soft delete with the caller cwd and renders the trash path', async () => {
+    const ctx = await setup({ registry: true })
+    const provider = fakeProvider()
+    ctx.memory.register(provider.provider)
+    const request = vi.fn(async (_req: { toolName: string; reason: string; callId?: unknown }) => 'allowed-once' as const)
+    ctx.provide('approval', { request })
+
+    const result = await call(ctx, 'memory_delete', { ref: 'n1' }, CWD)
+    expect(provider.delete).toHaveBeenCalledWith('n1', PROJECT_DIR, expect.anything(), undefined)
+    expect(request).toHaveBeenCalledTimes(1)
+    const asked = request.mock.calls[0]?.[0]
+    expect(asked).toMatchObject({
+      toolName: 'memory_delete',
+      reason: 'Delete the memory note "n1"?',
+    })
+    expect(asked?.callId).toBeDefined()
+    expect(textOf(result.content)).toContain('moved to')
+    await ctx.fiber.dispose()
+  })
+
+  it('passes an explicit scope through to the service', async () => {
+    const ctx = await setup({ registry: true })
+    const provider = fakeProvider()
+    ctx.memory.register(provider.provider)
+    ctx.provide('approval', { request: vi.fn(async () => 'allowed-once' as const) })
+
+    await call(ctx, 'memory_delete', { ref: 'n1', scope: 'global' }, CWD)
+    expect(provider.delete).toHaveBeenCalledWith('n1', GLOBAL_DIR, expect.anything(), undefined)
+    await ctx.fiber.dispose()
+  })
+
+  it('rejects an invalid scope before asking for approval', async () => {
+    const ctx = await setup()
+    const request = vi.fn()
+    ctx.provide('approval', { request })
+    const failed = await call(ctx, 'memory_delete', { ref: 'n1', scope: 'other' }, CWD)
+    expect(failed.isError).toBe(true)
+    expect(textOf(failed.content)).toContain('scope must be "project" or "global"')
+    expect(request).not.toHaveBeenCalled()
+    await ctx.fiber.dispose()
+  })
+
+  it('fails loudly when no approval channel is composed', async () => {
+    const ctx = await setup({ registry: true })
+    ctx.memory.register(fakeProvider().provider)
+    const failed = await call(ctx, 'memory_delete', { ref: 'n1' }, CWD)
+    expect(failed.isError).toBe(true)
+    expect(textOf(failed.content)).toContain('no approval channel is available')
+    await ctx.fiber.dispose()
+  })
+
+  it('denies on every non-grant outcome with a distinct reason', async () => {
+    for (const [outcome, expected] of [
+      ['rejected', 'the user rejected memory_delete'],
+      ['cancelled', 'approval for memory_delete was cancelled'],
+      ['unavailable', 'no approval channel is available'],
+    ] as const) {
+      const ctx = await setup({ registry: true })
+      const provider = fakeProvider()
+      ctx.memory.register(provider.provider)
+      ctx.provide('approval', { request: vi.fn(async () => outcome) })
+      const failed = await call(ctx, 'memory_delete', { ref: 'n1' }, CWD)
+      expect(failed.isError).toBe(true)
+      expect(textOf(failed.content)).toContain(expected)
+      expect(provider.delete).not.toHaveBeenCalled()
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('fails the call on a rogue non-vocabulary answerer return', async () => {
+    const ctx = await setup({ registry: true })
+    const provider = fakeProvider()
+    ctx.memory.register(provider.provider)
+    ctx.provide('approval', { request: vi.fn(async () => 'whatever' as never) })
+    const failed = await call(ctx, 'memory_delete', { ref: 'n1' }, CWD)
+    expect(failed.isError).toBe(true)
+    expect(provider.delete).not.toHaveBeenCalled()
+    await ctx.fiber.dispose()
+  })
+
+  it('requires an agent caller', async () => {
+    const ctx = await setup()
+    ctx.provide('approval', { request: vi.fn() })
+    const failed = await ctx.tools.execute({
+      signal,
+      callId: CallId('no-agent'),
+      name: 'memory_delete',
+      arguments: { ref: 'n1' },
+    })
+    expect(failed.isError).toBe(true)
+    expect(textOf(failed.content)).toContain('require an agent caller')
+    await ctx.fiber.dispose()
+  })
+})
+
 describe('memory_read, memory_search, and memory_traverse', () => {
   it('delegates each operation with the caller cwd', async () => {
     const ctx = await setup({ registry: true })
@@ -248,6 +349,7 @@ describe('render helpers', () => {
       path: 'p',
       tags: [],
       body: 'just body',
+      updated: 1,
       related: [],
       backlinks: [],
     }
@@ -265,6 +367,7 @@ describe('render helpers', () => {
       path: 'p',
       tags: ['a', 'b'],
       body: 'body',
+      updated: 1,
       related: [{ id: MemoryNoteId('n2'), title: 'Resolved' }, { title: 'Dangling' }],
       backlinks: [{ id: MemoryNoteId('n3'), title: 'Source' }],
     }
@@ -279,5 +382,12 @@ describe('render helpers', () => {
     const written = tool.renderWrite('project', 'T', 'notes/t.md')
     expect(textOf(written)).toContain('(project scope)')
     expect(textOf(tool.renderWrite('global', 'T', 'p'))).toContain('(global scope)')
+  })
+
+  it('renders delete results with and without a trash path', () => {
+    const trashed = tool.renderDelete({ scope: 'global', title: 'T', path: 'notes/t.md', trashPath: '/trash/t.md' })
+    expect(textOf(trashed)).toContain('moved to /trash/t.md')
+    const bare = tool.renderDelete({ scope: 'project', title: 'T', path: 'notes/t.md' })
+    expect(textOf(bare)).toContain('Deleted memory note "T" (project scope) from notes/t.md.')
   })
 })

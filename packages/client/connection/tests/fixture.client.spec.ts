@@ -1136,4 +1136,107 @@ describe('FixtureApiClient (protocol-level fake carrier)', () => {
     habort.abort()
     if (raced === 'idle') await hostIterator.return?.(undefined)
   })
+
+  it('serves the memory Remote endpoints over the /api dispatch', async () => {
+    const client = new FixtureApiClient()
+    const signal = new AbortController().signal
+    const info = await client.rpc.call('/api', 'memory/info', { args: {} }, signal)
+    expect(info).toEqual({ ok: true, value: { globalDir: '/home/fixture/memory' } })
+
+    const listed = await client.rpc.call('/api', 'memory/list', { args: { request: { scope: 'global' } } }, signal)
+    expect(listed).toMatchObject({
+      ok: true,
+      value: {
+        dir: '/home/fixture/memory',
+        scope: 'global',
+        notes: [
+          { id: 'persona', title: 'About the user', persona: true },
+          { id: 'n1', title: 'Coffee preference', persona: false },
+          { id: 'n2', title: 'Coffee gear', persona: false },
+        ],
+      },
+    })
+
+    const read = await client.rpc.call('/api', 'memory/read', { args: { request: { ref: 'n1' } } }, signal)
+    expect(read).toMatchObject({
+      ok: true,
+      value: { id: 'n1', title: 'Coffee preference', related: [{ title: 'Coffee gear', id: 'n2' }] },
+    })
+    const missed = await client.rpc.call('/api', 'memory/read', { args: { request: { ref: 'missing' } } }, signal)
+    expect(missed).toMatchObject({ ok: false, error: { message: 'no memory note matches "missing"' } })
+
+    const projectWithoutWorkspace = await client.rpc.call('/api', 'memory/read', {
+      args: { request: { ref: 'p2', scope: 'project' } },
+    }, signal)
+    expect(projectWithoutWorkspace).toMatchObject({
+      ok: false,
+      error: { message: 'project-scope write requires a session working directory' },
+    })
+    const project = await client.rpc.call('/api', 'memory/read', {
+      args: { request: { ref: 'p2', scope: 'project', workspaceDir: '/tmp/fixture' } },
+    }, signal)
+    expect(project).toMatchObject({
+      ok: true,
+      value: { id: 'p2', scope: 'project', title: 'Project convention', body: 'Vitest is the test runner here.' },
+    })
+
+    const journal = await client.rpc.call('/api', 'memory/read', { args: { request: { ref: 'adopted:journal/2026-08-19.md' } } }, signal)
+    expect(journal).toMatchObject({
+      ok: true,
+      value: { id: 'adopted:journal/2026-08-19.md', path: 'journal/2026-08-19.md', body: '## 2026-08-19\n\nRemembered the pour-over preference.' },
+    })
+
+    const searched = await client.rpc.call('/api', 'memory/search', { args: { request: { query: 'coffee' } } }, signal)
+    expect(searched).toMatchObject({ ok: true, value: [{ title: 'Coffee preference' }, { title: 'Coffee gear' }] })
+
+    const written = await client.rpc.call('/api', 'memory/write', { args: { request: { id: 'n1', title: 'Coffee preference', content: 'Updated.', tags: ['a'] } } }, signal)
+    expect(written).toMatchObject({ ok: true, value: { id: 'n1', title: 'Coffee preference' } })
+
+    const deleted = await client.rpc.call('/api', 'memory/delete', { args: { request: { ref: 'n2' } } }, signal)
+    expect(deleted).toMatchObject({ ok: true, value: { id: 'n2', trashPath: '/home/fixture/memory-trash/notes/a-note.md' } })
+  })
+
+  it('settles the fixture review: partition validation, promotion, and the decided event', async () => {
+    const client = new FixtureApiClient()
+    const signal = new AbortController().signal
+    const partial = await client.rpc.call('/api', 'memoryReview/decide', {
+      args: { agentId: sid('fx-alpha'), reviewId: 'fx-review-1', decisions: { accepted: ['p1'], rejected: [] } },
+    }, signal)
+    expect(partial).toEqual({
+      ok: true,
+      value: { ok: false, error: { code: 'undecided-candidates', reviewId: 'fx-review-1', ids: ['p2'] } },
+    })
+
+    const settled = await client.rpc.call('/api', 'memoryReview/decide', {
+      args: { agentId: sid('fx-alpha'), reviewId: 'fx-review-1', decisions: { accepted: ['p1'], rejected: ['p2'] } },
+    }, signal)
+    expect(settled).toEqual({
+      ok: true,
+      value: {
+        ok: true,
+        value: {
+          reviewId: 'fx-review-1',
+          accepted: [{ id: 'p1', title: 'Session notes', globalId: 'g-p1' }],
+          rejected: ['p2'],
+        },
+      },
+    })
+    const listed = await client.rpc.call('/api', 'memory/list', { args: { request: { scope: 'global' } } }, signal)
+    expect(listed).toMatchObject({ ok: true, value: { notes: [
+      { id: 'persona' },
+      { id: 'n1' },
+      { id: 'n2' },
+      { id: 'g-p1', title: 'Session notes' },
+    ] } })
+
+    const history = await client.sessions.history({ sessionId: sid('fx-alpha'), maxMessages: 5 })
+    const decided = history.result.ok
+      ? history.result.value.events.findLast(item => item.event.type === 'memory/review-decided')
+      : undefined
+    expect(decided?.event.type === 'memory/review-decided' && decided.event.data).toMatchObject({
+      reviewId: 'fx-review-1',
+      accepted: [{ id: 'p1', title: 'Session notes', globalId: 'g-p1' }],
+      rejected: ['p2'],
+    })
+  })
 })

@@ -29,6 +29,20 @@ export interface DistillOutput {
   readonly journal: DistillJournal
 }
 
+/** One candidate id/reason pair a review call proposes for promotion. */
+export interface ReviewCandidateProposal {
+  readonly id: string
+  readonly reason: string
+}
+
+/** The validated review call output. */
+export interface ReviewOutput {
+  readonly candidates: readonly ReviewCandidateProposal[]
+}
+
+/** The model-reply kinds that share the object-extraction contract. */
+type ModelReplyKind = 'distillation' | 'review'
+
 /**
  * Extract the first balanced JSON object from a model text reply, tolerating
  * surrounding prose and code fences.
@@ -67,10 +81,38 @@ export function extractJsonObject(text: string): string | undefined {
  * @returns the validated output, or `undefined` without a JSON value.
  */
 export function parseDistillOutput(text: string): DistillOutput | undefined {
+  return parseModelObject(text, 'distillation', validateDistillObject)
+}
+
+/**
+ * Parse and validate one review reply into candidate proposals. A reply with
+ * no JSON value yields `undefined` (nothing extractable); a reply whose value
+ * violates the review contract fails loudly.
+ * @param text - complete model text output.
+ * @returns the validated output, or `undefined` without a JSON value.
+ */
+export function parseReviewOutput(text: string): ReviewOutput | undefined {
+  return parseModelObject(text, 'review', validateReviewObject)
+}
+
+/**
+ * Extract one model reply's first JSON object and hand it to a kind-specific
+ * validator. Absent JSON yields `undefined`; non-object JSON or an unbalanced
+ * brace fails loudly.
+ * @param text - complete model text output.
+ * @param kind - which contract the reply must satisfy, for diagnostics.
+ * @param validate - kind-specific validator over the parsed object root.
+ * @returns the validated output, or `undefined` without a JSON value.
+ */
+function parseModelObject<T>(
+  text: string,
+  kind: ModelReplyKind,
+  validate: (value: Record<string, unknown>) => T,
+): T | undefined {
   const raw = extractJsonObject(text)
-  if (raw !== undefined) return validateDistillObject(parseJson(raw) as Record<string, unknown>)
+  if (raw !== undefined) return validate(parseJson(raw, kind) as Record<string, unknown>)
   if (text.includes('{')) {
-    throw new Error('memory-lifecycle: distillation output is not valid JSON (unbalanced object)')
+    throw new Error(`memory-lifecycle: ${kind} output is not valid JSON (unbalanced object)`)
   }
   const trimmed = text.trim()
   if (trimmed === '') return undefined
@@ -79,19 +121,19 @@ export function parseDistillOutput(text: string): DistillOutput | undefined {
     // carries braces, so extraction already handled it: anything that parses
     // here is a non-object and violates the contract.
     JSON.parse(trimmed)
-    throw new Error('memory-lifecycle: distillation JSON must be an object')
+    throw new Error(`memory-lifecycle: ${kind} JSON must be an object`)
   } catch (error: unknown) {
-    if (error instanceof Error && error.message.startsWith('memory-lifecycle: distillation JSON')) throw error
+    if (error instanceof Error && error.message.startsWith(`memory-lifecycle: ${kind} JSON`)) throw error
     return undefined
   }
 }
 
 /** Parse one extracted raw JSON substring with a loud failure. */
-function parseJson(raw: string): unknown {
+function parseJson(raw: string, kind: ModelReplyKind): unknown {
   try {
     return JSON.parse(raw)
   } catch (error: unknown) {
-    throw new Error(`memory-lifecycle: distillation output is not valid JSON: ${String(error)}`)
+    throw new Error(`memory-lifecycle: ${kind} output is not valid JSON: ${String(error)}`)
   }
 }
 
@@ -107,6 +149,30 @@ function validateDistillObject(value: Record<string, unknown>): DistillOutput {
   const notes = (value.notes as unknown[]).map(parseCandidate)
   const journal = parseJournal(value.journal)
   return { notes, journal }
+}
+
+/**
+ * Validate one parsed JSON object root against the review contract.
+ * @param value - a `JSON.parse`d object (extraction guarantees the braces).
+ * @returns the validated output.
+ */
+function validateReviewObject(value: Record<string, unknown>): ReviewOutput {
+  if (!Array.isArray(value.candidates)) {
+    throw new Error('memory-lifecycle: review output requires a candidates array')
+  }
+  return { candidates: (value.candidates as unknown[]).map(parseReviewCandidate) }
+}
+
+/** Validate one review candidate entry. */
+function parseReviewCandidate(value: unknown): ReviewCandidateProposal {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('memory-lifecycle: each review candidate must be an object')
+  }
+  const record = value as Record<string, unknown>
+  return {
+    id: nonEmptyString(record.id, 'review candidate id'),
+    reason: nonEmptyString(record.reason, 'review candidate reason'),
+  }
 }
 
 /** Validate one candidate note entry. */

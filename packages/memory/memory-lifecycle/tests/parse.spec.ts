@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { extractJsonObject, parseDistillOutput } from '../src/parse.ts'
+import { extractJsonObject, parseDistillOutput, parseReviewOutput } from '../src/parse.ts'
 
 const VALID_OUTPUT = {
   notes: [
@@ -73,5 +73,31 @@ describe('parseDistillOutput', () => {
     expect(() => parseDistillOutput('{"notes":[],"journal":{"title":"","body":"b"}}')).toThrow('journal title must be a non-empty string')
     expect(() => parseDistillOutput('{"notes":[],"journal":{"title":"t","body":"  "}}')).toThrow('journal body must be a non-empty string')
     expect(() => parseDistillOutput('{"notes":[],"journal":"t"}')).toThrow('requires a journal entry object')
+  })
+})
+
+describe('parseReviewOutput', () => {
+  it('parses candidate proposals from plain or fenced text', () => {
+    const output = parseReviewOutput(`Here: ${JSON.stringify({ candidates: [{ id: 'p1', reason: 'User-wide.' }] })}`)
+    expect(output?.candidates).toEqual([{ id: 'p1', reason: 'User-wide.' }])
+    expect(parseReviewOutput(JSON.stringify({ candidates: [] }))?.candidates).toEqual([])
+  })
+
+  it('returns undefined for a reply without a JSON object', () => {
+    expect(parseReviewOutput('nothing to promote')).toBeUndefined()
+    expect(parseReviewOutput('   ')).toBeUndefined()
+  })
+
+  it('rejects invalid JSON, non-object roots, and a missing candidates array', () => {
+    expect(() => parseReviewOutput('{"candidates": []')).toThrow('review output is not valid JSON')
+    expect(() => parseReviewOutput('null')).toThrow('review JSON must be an object')
+    expect(() => parseReviewOutput('{}')).toThrow('review output requires a candidates array')
+  })
+
+  it('rejects malformed candidates field by field', () => {
+    const withCandidate = (candidate: unknown) => JSON.stringify({ candidates: [candidate] })
+    expect(() => parseReviewOutput(withCandidate('not-an-object'))).toThrow('each review candidate must be an object')
+    expect(() => parseReviewOutput(withCandidate({ id: '', reason: 'r' }))).toThrow('review candidate id must be a non-empty string')
+    expect(() => parseReviewOutput(withCandidate({ id: 'p1', reason: ' ' }))).toThrow('review candidate reason must be a non-empty string')
   })
 })

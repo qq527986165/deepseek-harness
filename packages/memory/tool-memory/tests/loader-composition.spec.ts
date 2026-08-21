@@ -1,7 +1,7 @@
 // Real-composition proof: a cordis.yml boots the memory service, the local
 // provider, and the model tools through the real Loader; tool calls then write,
 // read, search, and traverse durable vault files with no model key.
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -15,6 +15,7 @@ import AgentRegistry, { Inbox } from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
+import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import MemoryService from '@deepseek-ai/dsh-memory'
 import * as MemoryLocal from '@deepseek-ai/dsh-memory-local'
 import * as ToolMemory from '@deepseek-ai/dsh-tool-memory'
@@ -48,6 +49,11 @@ function resultText(result: { content: { type: string; text?: string }[] }): str
   return result.content.filter(block => block.type === 'text').map(block => block.text).join('')
 }
 
+/** An answerer plugin granting every approval question, for assembled flows. */
+function allowAllApprovals(ctx: Context): void {
+  ctx.on('approval/request', () => Promise.resolve('allowed-once' as const))
+}
+
 async function boot(): Promise<Context> {
   root = await mkdtemp(join(tmpdir(), 'dsh-memory-loader-'))
   const vault = join(root, 'vault')
@@ -61,6 +67,8 @@ async function boot(): Promise<Context> {
     "- name: '@deepseek-ai/dsh-memory-local'",
     '  config: { watch: false }',
     "- name: '@deepseek-ai/dsh-tool-memory'",
+    "- name: '@deepseek-ai/dsh-user-approval'",
+    "- name: 'allow-all-approvals'",
     '',
   ].join('\n'))
 
@@ -76,6 +84,8 @@ async function boot(): Promise<Context> {
     ['@deepseek-ai/dsh-memory', MemoryService],
     ['@deepseek-ai/dsh-memory-local', MemoryLocal],
     ['@deepseek-ai/dsh-tool-memory', ToolMemory],
+    ['@deepseek-ai/dsh-user-approval', ApprovalService],
+    ['allow-all-approvals', allowAllApprovals],
   ])
   ctx.loader.internal = {
     version: 'v2',
@@ -123,6 +133,40 @@ describe('memory real Loader composition through cordis.yml', () => {
     const traverse = await execute('memory_traverse', { ref: 'Linked note', kinds: ['related'] })
     expect(traverse.isError).toBe(false)
     expect(resultText(traverse)).toContain('Vitest setup (out related)')
+  }, 30_000)
+
+  it('deletes an approved note into the trash with index and inbound link cleanup', async () => {
+    const ctx = await boot()
+    const owner = agent(ctx)
+    const a = await ctx.memory.write({ scope: 'global', title: 'Source', content: 'Links [[Doomed]].' }, undefined)
+    const b = await ctx.memory.write({ scope: 'global', title: 'Doomed', content: 'A fact about vitest.' }, undefined)
+    const before = await ctx.memory.traverse(a.id, undefined, undefined)
+    expect(before.nodes).toHaveLength(1)
+
+    // The approval seam requires a turn-enclosed ask.
+    owner.session.append('turn/start', { turn: 1 })
+    owner.session.append('step/start', { turn: 1, step: 1 })
+    const deleted = await ctx.tools.execute({
+      signal: new AbortController().signal,
+      callId: CallId('memory_delete'),
+      name: 'memory_delete',
+      arguments: { ref: b.id },
+      agent: owner,
+    })
+    expect(deleted.isError).toBe(false)
+    expect(resultText(deleted)).toContain('moved to')
+
+    expect(owner.session.events.some(event => event.type === 'approval/asked')).toBe(true)
+    expect(owner.session.events.some(event => event.type === 'approval/decided')).toBe(true)
+
+    const vaultFile = join(root!, 'vault', 'notes', 'doomed.md')
+    await expect(stat(vaultFile)).rejects.toMatchObject({ code: 'ENOENT' })
+    const trashed = await readFile((deleted.value as { trashPath: string }).trashPath, 'utf8')
+    expect(trashed).toContain('A fact about vitest.')
+
+    await expect(ctx.memory.read(b.id, undefined)).rejects.toMatchObject({ code: 'NOT_FOUND' })
+    const after = await ctx.memory.traverse(a.id, undefined, undefined)
+    expect(after.nodes).toEqual([])
   }, 30_000)
 
   it('answers tool calls loudly when no provider row is mounted', async () => {

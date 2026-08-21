@@ -509,7 +509,7 @@ Source: [`packages/llm/llm-retry/src/types.ts:11`](../packages/llm/llm-retry/src
 'memory/distill': MemoryDistillEventData
 ```
 
-Source: [`packages/memory/memory-lifecycle/src/types.ts:82`](../packages/memory/memory-lifecycle/src/types.ts)
+Source: [`packages/memory/memory-lifecycle/src/types.ts:142`](../packages/memory/memory-lifecycle/src/types.ts)
 
 <a id="memoryinject--log-only"></a>
 
@@ -517,14 +517,47 @@ Source: [`packages/memory/memory-lifecycle/src/types.ts:82`](../packages/memory/
 
 ```ts persistence-catalog
 /**
- * Provenance of one memory context injection. The injected text itself is
- * logged as the matching `user/message`; this log-only event records which
- * files were loaded and why, so the injected set reconstructs from the log.
+ * Provenance of one memory context injection: the persona notes in full
+ * plus the note-catalog entries whose text entered the injected context.
+ * The injected text itself is logged as the matching `user/message`; this
+ * log-only event records which files were loaded and why, so the injected
+ * set reconstructs from the log.
  */
 'memory/inject': MemoryInjectEventData
 ```
 
-Source: [`packages/memory/memory-lifecycle/src/types.ts:76`](../packages/memory/memory-lifecycle/src/types.ts)
+Source: [`packages/memory/memory-lifecycle/src/types.ts:136`](../packages/memory/memory-lifecycle/src/types.ts)
+
+<a id="memoryreview--log-only"></a>
+
+#### `memory/review` — log-only
+
+```ts persistence-catalog
+/**
+ * One `/memory-review` proposal: the bounded project→global upgrade
+ * candidate set one auxiliary call produced. Log-only; the conversation
+ * node renders candidate cards from this event and settles through
+ * `memory/review-decided`.
+ */
+'memory/review': MemoryReviewEventData
+```
+
+Source: [`packages/memory/memory-lifecycle/src/types.ts:149`](../packages/memory/memory-lifecycle/src/types.ts)
+
+<a id="memoryreview-decided--log-only"></a>
+
+#### `memory/review-decided` — log-only
+
+```ts persistence-catalog
+/**
+ * The user's decision on one review: every promoted note with its global
+ * replacement, and every rejected id. Appended by the `memoryReview.decide`
+ * remote after the promotion commits.
+ */
+'memory/review-decided': MemoryReviewDecidedEventData
+```
+
+Source: [`packages/memory/memory-lifecycle/src/types.ts:155`](../packages/memory/memory-lifecycle/src/types.ts)
 
 ### `permission/*`
 

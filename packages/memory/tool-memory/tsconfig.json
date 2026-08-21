@@ -18,6 +18,9 @@
       "path": "../../runtime-diagnostics/invariants"
     },
     {
+      "path": "../../interaction/user-approval"
+    },
+    {
       "path": "../memory"
     }
   ]

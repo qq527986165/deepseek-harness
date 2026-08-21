@@ -14,8 +14,15 @@ import { join, resolve } from 'node:path'
 // augmentation. The registry stays optional at runtime — see `resolveScopes`.
 import type {} from '@deepseek-ai/dsh-workspace'
 import type {
+  MemoryDeleteOptions,
+  MemoryDeleteResult,
+  MemoryDistillCommitGroupInput,
+  MemoryDistillCommitResult,
+  MemoryInfo,
   MemoryJournalAppendInput,
   MemoryJournalAppendResult,
+  MemoryListOptions,
+  MemoryListResult,
   MemoryNote,
   MemoryPersona,
   MemoryProvider,
@@ -31,10 +38,21 @@ import type {
 } from './types.ts'
 
 export type {
+  MemoryDeleteOptions,
+  MemoryDeleteResult,
+  MemoryDistillCommitGroupInput,
+  MemoryDistillCommitNoteInput,
+  MemoryDistillCommitResult,
+  MemoryDistillCommittedJournal,
+  MemoryDistillCommittedNote,
+  MemoryInfo,
   MemoryJournalAppendInput,
   MemoryJournalAppendResult,
   MemoryLinkKind,
   MemoryLinkTarget,
+  MemoryListOptions,
+  MemoryListResult,
+  MemoryListedNote,
   MemoryNote,
   MemoryPersona,
   MemoryProvider,
@@ -54,18 +72,6 @@ export { MemoryNoteId } from './types.ts'
 declare module '@deepseek-ai/cordis' {
   interface Context {
     memory: MemoryService
-  }
-
-  interface Events {
-    /**
-     * The registered provider finished a watcher-driven reconciliation of one
-     * vault directory. Consumers tracking injected context compare the changed
-     * files against what they loaded.
-     * @param payload.dir - absolute vault directory that changed.
-     * @param payload.paths - changed markdown file paths relative to the vault root.
-     * @mode emit
-     */
-    'memory/change'(payload: { dir: string; paths: string[] }): void
   }
 }
 
@@ -319,12 +325,141 @@ export class MemoryService extends Service {
     return { dir, ...result }
   }
 
+  /**
+   * Atomically create one whole turn's distilled nodes and one journal entry
+   * per participating scope. The provider owns staging, rollback, indexing,
+   * and post-commit verification inside the resolved vault directories.
+   * `scope: 'project'` requires the caller's cwd to resolve to a registered
+   * workspace.
+   * @param groups - non-empty scope-local node and journal groups.
+   * @param cwd - caller session working directory.
+   * @param signal - caller cancellation.
+   * @returns the verified committed node and journal references.
+   */
+  async commitDistill(
+    groups: readonly MemoryDistillCommitGroupInput[],
+    cwd: string | undefined,
+    signal?: AbortSignal,
+  ): Promise<MemoryDistillCommitResult> {
+    signal?.throwIfAborted()
+    if (groups.some(group => group.scope === 'project')) {
+      await this.projectVaultOrThrow(cwd)
+    }
+    return this.track(this.expectProvider().commitDistill(groups, {
+      project: cwd === undefined ? undefined : projectDir(cwd),
+      global: this.globalDir,
+    }, signal))
+  }
+
+  /**
+   * Read-only service facts for settings surfaces: the configured global
+   * vault directory.
+   * @returns the global vault directory.
+   */
+  info(): MemoryInfo {
+    return { globalDir: this.globalDir }
+  }
+
+  /**
+   * One vault's listable note rows: the persona file plus `notes/` notes,
+   * journal excluded, `updated` descending with the persona pinned first.
+   * `scope: 'project'` requires the caller's cwd to resolve to a registered
+   * workspace.
+   * @param scope - which single vault to list.
+   * @param cwd - caller session working directory.
+   * @param opts - optional row cap, bounded above by provider config.
+   * @param signal - caller cancellation.
+   * @returns the vault directory, scope, and its listable rows.
+   */
+  async list(
+    scope: MemoryScope,
+    cwd: string | undefined,
+    opts?: MemoryListOptions,
+    signal?: AbortSignal,
+  ): Promise<MemoryListResult> {
+    signal?.throwIfAborted()
+    const dir = scope === 'project' ? await this.projectVaultOrThrow(cwd) : this.globalDir
+    const notes = await this.track(this.expectProvider().listNotes(opts, dir, signal))
+    return { dir, scope, notes }
+  }
+
+  /**
+   * Ranked full-text search within one explicit vault, skipping the chain.
+   * Used by per-tab surfaces that search exactly the vault they list.
+   * @param query - FTS query terms.
+   * @param opts - optional limit, bounded above by provider config.
+   * @param scope - the single vault to search.
+   * @param cwd - caller session working directory.
+   * @param signal - caller cancellation.
+   * @returns ranked hits with snippets and tags.
+   */
+  async searchInScope(
+    query: string,
+    opts: MemorySearchOptions | undefined,
+    scope: MemoryScope,
+    cwd: string | undefined,
+    signal?: AbortSignal,
+  ): Promise<MemorySearchHit[]> {
+    signal?.throwIfAborted()
+    const dir = scope === 'project' ? await this.projectVaultOrThrow(cwd) : this.globalDir
+    return this.track(this.expectProvider().search(query, opts, [dir], signal))
+  }
+
+  /**
+   * Delete one note by id or exact title. Without an explicit scope the note
+   * resolves across the caller's scope chain, project first; with one, only
+   * that vault is searched. Deletion is soft by default: the provider moves
+   * the file to the sibling trash folder and drops the index rows plus every
+   * inbound link row, leaving surviving wikilinks to dangle.
+   * @param ref - note id or exact title.
+   * @param scope - optional single vault to resolve within.
+   * @param cwd - caller session working directory.
+   * @param signal - caller cancellation.
+   * @param opts - optional deletion mode; `permanent` removes the file outright.
+   * @returns the deleted note reference and the trash path when moved.
+   */
+  async delete(
+    ref: string,
+    scope: MemoryScope | undefined,
+    cwd: string | undefined,
+    signal?: AbortSignal,
+    opts?: MemoryDeleteOptions,
+  ): Promise<MemoryDeleteResult> {
+    signal?.throwIfAborted()
+    if (scope !== undefined) {
+      const dir = scope === 'project' ? await this.projectVaultOrThrow(cwd) : this.globalDir
+      const result = await this.track(this.expectProvider().delete(ref, dir, signal, opts))
+      return { ...result, scope }
+    }
+    const dirs = await this.dirsFor(cwd)
+    let last: MemoryError | undefined
+    for (const dir of dirs) {
+      try {
+        const result = await this.track(this.expectProvider().delete(ref, dir, signal, opts))
+        return { ...result, scope: this.scopeOf(dir, dirs) }
+      } catch (error: unknown) {
+        if (error instanceof MemoryError && error.code === 'NOT_FOUND') {
+          last = error
+          continue
+        }
+        throw error
+      }
+    }
+    /* v8 ignore next -- dirsFor always yields the global vault, so a completed loop recorded a NOT_FOUND. */
+    throw last ?? new MemoryError(`no memory note matches "${ref}"`, 'NOT_FOUND')
+  }
+
   /** Resolve the ordered vault directories for one cwd: project first, global last. */
   private async dirsFor(cwd: string | undefined): Promise<string[]> {
     const scopes = await this.resolveScopes(cwd)
     return scopes[0] === 'project' && cwd !== undefined
       ? [projectDir(cwd), this.globalDir]
       : [this.globalDir]
+  }
+
+  /** Which scope one directory maps to: the chain head is the project vault. */
+  private scopeOf(dir: string, dirs: readonly string[]): MemoryScope {
+    return dirs.length > 1 && dir === dirs[0] ? 'project' : 'global'
   }
 
   /** Resolve the project vault for a project-scope write, failing loudly without one. */
@@ -393,7 +528,7 @@ export class MemoryService extends Service {
     if (candidate === null || typeof candidate !== 'object') {
       throw new Error('memory provider must be an object')
     }
-    for (const method of ['write', 'read', 'search', 'traverse', 'readPersona', 'recentNotes', 'appendJournal']) {
+    for (const method of ['write', 'read', 'search', 'traverse', 'readPersona', 'recentNotes', 'appendJournal', 'commitDistill', 'listNotes', 'delete']) {
       if (typeof candidate[method] !== 'function') {
         throw new Error(`memory provider must implement ${method}()`)
       }

@@ -2,7 +2,7 @@
 
 English | [中文](memory.zh.md)
 
-Memory is the first-party, default-off cross-session memory capability: two Obsidian-compatible markdown vaults (one global, one per project) with a derived SQLite full-text/link index, four model-facing tools, and an automatic lifecycle — session-start context injection plus every-turn distillation into topic notes and a linked journal. The subsystem is four packages under `packages/memory/` — the `dsh-memory` service, the `dsh-memory-local` file-first provider, the `dsh-tool-memory` model tools, and the `dsh-memory-lifecycle` automation consumer. Design, phasing, and rejected alternatives: [first-party memory Agent Note](../../.agents/notes/proposed/feature/2026-08-18-first-party-pluggable-memory.md). Package config lives in each package README.
+Memory is the first-party, default-off cross-session memory capability: two Obsidian-compatible markdown vaults (one global, one per project) with a derived SQLite full-text/link index, five model-facing tools, an automatic lifecycle — session-start context injection plus every-turn distillation into topic notes and a linked journal — a browser-facing remote transport, and the `/memory-review` promotion flow. The subsystem is five packages under `packages/memory/` — the `dsh-memory` service, the `dsh-memory-local` file-first provider, the `dsh-tool-memory` model tools, the `dsh-memory-lifecycle` automation consumer, and the `dsh-memory-remote` web transport. Design, phasing, and rejected alternatives: [first-party memory Agent Note](../../.agents/notes/proposed/feature/2026-08-18-first-party-pluggable-memory.md). Package config lives in each package README.
 
 Source: [`packages/memory/memory/src/types.ts`](../../packages/memory/memory/src/types.ts)
 
@@ -12,15 +12,15 @@ A session's scope chain resolves from its cwd: a cwd matching a registered works
 
 ## Notes and journal
 
-A provider-written note is markdown with frontmatter (`id`, `scope`, `title`, `created`, `updated`, `tags`, `related`) plus a body; body `[[wikilinks]]` and frontmatter `related` titles become typed link rows (`wikilink`/`related`) queried in both directions. Files without that frontmatter are adopted under a deterministic `adopted:<path>` identity — any existing markdown folder becomes searchable memory. `memory_write` replaces by `id` in place, preserving `created`; the filename derives from the title at creation and is stable. `appendJournal` adds one `## heading` entry to the day's `journal/YYYY-MM-DD.md` on the provider's exclusive chain, creating the file with a `type: journal` frontmatter when absent.
+A provider-written note is markdown with frontmatter (`id`, `scope`, `title`, `created`, `updated`, `tags`, `related`) plus a body; body `[[wikilinks]]` and frontmatter `related` titles become typed link rows (`wikilink`/`related`) queried in both directions. Files without that frontmatter are adopted under a deterministic `adopted:<path>` identity — any existing markdown folder becomes searchable memory. `memory_write` replaces by `id` in place, preserving `created`; the filename derives from the title at creation and is stable. `appendJournal` adds one `## heading` entry to the day's `journal/YYYY-MM-DD.md` on the provider's exclusive chain, creating the file with a `type: journal` frontmatter when absent. Deletion is soft: the file moves to the sibling `memory-trash/` folder outside the vault with a timestamped filename, the index drops the note rows plus every inbound link row, and surviving wikilinks dangle on the next rebuild. The promotion flow removes the project file outright instead, because the content is already written to the global vault.
 
 ## The service surface
 
-`ctx.memory` is the sole-provider seam: `register()` accepts exactly one provider, `resolveScopes(cwd)` owns scope resolution, and `write`/`read`/`search`/`traverse` route to the provider with explicit vault directories; `readInScope`, `readPersona`, `recent`, and `appendJournal` serve the lifecycle consumer. Failures use `MemoryError` with codes `DUPLICATE_PROVIDER`, `NO_PROVIDER`, `NO_PROJECT_SCOPE`, and `NOT_FOUND`. The provider emits `memory/change` after each watcher-driven vault reconciliation; the lifecycle consumer logs `memory/inject` for every injected context and `memory/distill` for every distillation write record, so model-visible injection and every silent mutation reconstruct from the session log.
+`ctx.memory` is the sole-provider seam: `register()` accepts exactly one provider, `resolveScopes(cwd)` owns scope resolution, and `write`/`read`/`search`/`traverse` route to the provider with explicit vault directories; `readInScope`, `readPersona`, `recent`, and `appendJournal` serve the lifecycle consumer, while `list`, `searchInScope`, `delete`, and `info` serve the panel and its remote transport. Failures use `MemoryError` with codes `DUPLICATE_PROVIDER`, `NO_PROVIDER`, `NO_PROJECT_SCOPE`, and `NOT_FOUND`. The provider emits `memory/change` after each watcher-driven vault reconciliation; the lifecycle consumer logs `memory/inject` for every injected context, `memory/distill` for every distillation write record, and `memory/review` for every promotion proposal, so model-visible injection and every silent mutation reconstruct from the session log.
 
 ## Consumers
 
-`dsh-tool-memory` registers the four model tools. `dsh-memory-lifecycle` injects both persona notes plus a byte-capped recency window of project topic notes on `agent/session-start`, reloads them when a loaded file changes, distills each finished turn through one cache-reusing auxiliary call (classifying candidates `project`/`global` and merging instead of restating), appends the turn's journal entry, and registers a short guidance section telling the model when to consult and when to write memory explicitly.
+`dsh-tool-memory` registers the five model tools; deletion asks through the approval seam first. `dsh-memory-lifecycle` injects both persona notes in full plus a byte-capped note catalog (title, tags, updated date, first-line excerpt) on `agent/session-start`, reloads them when a loaded file changes, distills each finished turn through one cache-reusing auxiliary call whose instruction the `distillMode` setting selects (classifying candidates `project`/`global` and merging instead of restating), appends the turn's journal entry, registers a short guidance section telling the model when to consult and when to write memory explicitly, and runs the `/memory-review` promotion flow. `dsh-memory-remote` serves the browser: the session-independent `memory` namespace (panel operations over an explicit `workspaceDir` for the project vault) and the session-addressed `memoryReview.decide`, which validates against the live session log and promotes accepted notes write-first.
 
 <!-- BEGIN GENERATED cordis-surface (gen-cordis-catalog.ts) — do not edit between markers -->
 
@@ -140,9 +140,69 @@ async recent( opts: MemoryRecentOptions | undefined, cwd: string | undefined, si
  * @returns the committed journal file reference.
  */
 async appendJournal( input: MemoryJournalAppendInput, cwd: string | undefined, signal?: AbortSignal, ): Promise<MemoryJournalAppendResult>
+
+/**
+ * Atomically create one whole turn's distilled nodes and one journal entry
+ * per participating scope. The provider owns staging, rollback, indexing,
+ * and post-commit verification inside the resolved vault directories.
+ * `scope: 'project'` requires the caller's cwd to resolve to a registered
+ * workspace.
+ * @param groups - non-empty scope-local node and journal groups.
+ * @param cwd - caller session working directory.
+ * @param signal - caller cancellation.
+ * @returns the verified committed node and journal references.
+ */
+async commitDistill( groups: readonly MemoryDistillCommitGroupInput[], cwd: string | undefined, signal?: AbortSignal, ): Promise<MemoryDistillCommitResult>
+
+/**
+ * Read-only service facts for settings surfaces: the configured global
+ * vault directory.
+ * @returns the global vault directory.
+ */
+info(): MemoryInfo
+
+/**
+ * One vault's listable note rows: the persona file plus `notes/` notes,
+ * journal excluded, `updated` descending with the persona pinned first.
+ * `scope: 'project'` requires the caller's cwd to resolve to a registered
+ * workspace.
+ * @param scope - which single vault to list.
+ * @param cwd - caller session working directory.
+ * @param opts - optional row cap, bounded above by provider config.
+ * @param signal - caller cancellation.
+ * @returns the vault directory, scope, and its listable rows.
+ */
+async list( scope: MemoryScope, cwd: string | undefined, opts?: MemoryListOptions, signal?: AbortSignal, ): Promise<MemoryListResult>
+
+/**
+ * Ranked full-text search within one explicit vault, skipping the chain.
+ * Used by per-tab surfaces that search exactly the vault they list.
+ * @param query - FTS query terms.
+ * @param opts - optional limit, bounded above by provider config.
+ * @param scope - the single vault to search.
+ * @param cwd - caller session working directory.
+ * @param signal - caller cancellation.
+ * @returns ranked hits with snippets and tags.
+ */
+async searchInScope( query: string, opts: MemorySearchOptions | undefined, scope: MemoryScope, cwd: string | undefined, signal?: AbortSignal, ): Promise<MemorySearchHit[]>
+
+/**
+ * Delete one note by id or exact title. Without an explicit scope the note
+ * resolves across the caller's scope chain, project first; with one, only
+ * that vault is searched. Deletion is soft by default: the provider moves
+ * the file to the sibling trash folder and drops the index rows plus every
+ * inbound link row, leaving surviving wikilinks to dangle.
+ * @param ref - note id or exact title.
+ * @param scope - optional single vault to resolve within.
+ * @param cwd - caller session working directory.
+ * @param signal - caller cancellation.
+ * @param opts - optional deletion mode; `permanent` removes the file outright.
+ * @returns the deleted note reference and the trash path when moved.
+ */
+async delete( ref: string, scope: MemoryScope | undefined, cwd: string | undefined, signal?: AbortSignal, opts?: MemoryDeleteOptions, ): Promise<MemoryDeleteResult>
 ```
 
-Source: [`packages/memory/memory/src/index.ts:118`](../../packages/memory/memory/src/index.ts)
+Source: [`packages/memory/memory/src/index.ts:124`](../../packages/memory/memory/src/index.ts)
 
 <a id="memory-events"></a>
 
@@ -159,12 +219,11 @@ The registered provider finished a watcher-driven reconciliation of one vault di
  * The registered provider finished a watcher-driven reconciliation of one
  * vault directory. Consumers tracking injected context compare the changed
  * files against what they loaded.
- * @param payload.dir - absolute vault directory that changed.
- * @param payload.paths - changed markdown file paths relative to the vault root.
  * @mode emit
+ * @param payload - vault directory and the changed files relative to it.
  */
 'memory/change'(payload: { dir: string; paths: string[] }): void
 ```
 
-Source: [`packages/memory/memory/src/index.ts:68`](../../packages/memory/memory/src/index.ts)
+Source: [`packages/memory/memory/src/types.ts:299`](../../packages/memory/memory/src/types.ts)
 <!-- END GENERATED cordis-surface -->

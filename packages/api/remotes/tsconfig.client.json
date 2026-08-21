@@ -34,6 +34,12 @@
       "path": "../../feedback/message-feedback"
     },
     {
+      "path": "../../memory/memory"
+    },
+    {
+      "path": "../../memory/memory-remote"
+    },
+    {
       "path": "../../host/plugin-inventory"
     },
     {

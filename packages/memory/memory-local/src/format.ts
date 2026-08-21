@@ -147,3 +147,22 @@ export function newNotePath(title: string, taken: ReadonlySet<string>): string {
   }
   return candidate
 }
+
+/**
+ * Pick the `notes/<summary>-<short-id>.md` path used by host distillation.
+ * The short id is part of the filename even when the summary slug is unique.
+ * @param title - note title whose concise summary seeds the slug.
+ * @param shortId - provider-minted short id suffix.
+ * @param taken - relative paths already owned in the vault.
+ * @returns a unique distillation note path.
+ */
+export function newDistillNotePath(title: string, shortId: string, taken: ReadonlySet<string>): string {
+  const base = `${slugify(title)}-${shortId}`
+  let candidate = `${NOTES_DIR}/${base}.md`
+  let suffix = 2
+  while (taken.has(candidate)) {
+    candidate = `${NOTES_DIR}/${base}-${suffix}.md`
+    suffix += 1
+  }
+  return candidate
+}

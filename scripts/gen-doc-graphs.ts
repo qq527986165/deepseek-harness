@@ -120,7 +120,7 @@ const SERVICE_ROLES: ServiceRole[] = [
     title: 'Memory capability seam',
     mode: 'seam',
     implementations: ['memory-local'],
-    consumers: ['tool-memory', 'memory-lifecycle'],
+    consumers: ['tool-memory', 'memory-lifecycle', 'memory-remote'],
     note: 'The sole-provider seam resolves session vault scopes; the file-first provider owns the Obsidian-compatible vaults and their derived SQLite index.',
   },
   {

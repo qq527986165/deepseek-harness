@@ -1,26 +1,44 @@
 /**
- * Session-start injection assembly: load the scope chain's persona notes and
- * the project recency window, then render them into one byte-capped
- * model-facing context whose provenance the memory/inject event records.
+ * Session-start injection assembly: load the scope chain's persona notes in
+ * full plus the note catalog (title, tags, updated date, first-line excerpt,
+ * newest first), then render them into one byte-capped model-facing context
+ * whose provenance the memory/inject event records.
  * @module @deepseek-ai/dsh-memory-lifecycle/inject
  */
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { MemoryScope } from '@deepseek-ai/dsh-memory'
-import type { ResolvedConfig } from './config.ts'
 import type { MemoryInjectRef } from './types.ts'
 
-/** One loaded memory file entering the injected context. */
-export interface InjectedPiece {
+/** One persona note entering the injected context whole. */
+export interface InjectedPersona {
+  readonly kind: 'persona'
+  readonly scope: MemoryScope
+  /** Absolute vault directory. */
+  readonly dir: string
+  /** File path relative to the vault root; always `MEMORY.md`. */
+  readonly path: string
+  readonly text: string
+}
+
+/** One note-catalog entry entering the injected context as structured fields. */
+export interface InjectedCatalogEntry {
+  readonly kind: 'catalog'
   readonly scope: MemoryScope
   /** Absolute vault directory. */
   readonly dir: string
   /** File path relative to the vault root. */
   readonly path: string
-  /** Topic-note title; absent for persona notes. */
-  readonly title?: string
-  readonly text: string
+  readonly title: string
+  readonly tags: readonly string[]
+  /** Index timestamp in epoch milliseconds of the latest indexed update. */
+  readonly updated: number
+  /** First non-empty body line. */
+  readonly excerpt: string
 }
+
+/** One loaded memory fact entering the injected context. */
+export type InjectedPiece = InjectedPersona | InjectedCatalogEntry
 
 /** The assembled injection: complete model-facing text plus the files it covers. */
 export interface BuiltInjection {
@@ -31,35 +49,51 @@ export interface BuiltInjection {
 /** The heading each injected context opens with. */
 const INJECTION_HEADING = 'Memory context'
 
+/** The heading the note catalog renders under. */
+const CATALOG_HEADING = 'Memory note catalog'
+
 /** Marker appended when the byte cap cut the assembled text short. */
 const TRUNCATION_MARKER = '\n\n(truncated: memory context exceeded the injection byte cap)'
 
+/** One catalog entry's updated date, rendered as an ISO calendar day. */
+function isoDay(updated: number): string {
+  return new Date(updated).toISOString().slice(0, 10)
+}
+
 /**
- * Load the persona notes of every resolved scope plus the project recency
- * window, project scope first. The journal never enters this set: recency only
- * walks topic notes and the persona reads target MEMORY.md alone.
+ * Load the persona notes of every resolved scope in full plus every scope's
+ * note catalog, project scope first. The journal never enters the injected
+ * set: listing skips journal rows and the persona reads target MEMORY.md alone.
  * @param ctx - context carrying the memory service.
  * @param cwd - session working directory, or `undefined` for global-only sessions.
- * @param config - resolved lifecycle parameters.
  * @returns the loaded pieces, or `undefined` when nothing exists to inject.
  */
 export async function loadInjectionPieces(
   ctx: Context,
   cwd: string | undefined,
-  config: ResolvedConfig,
 ): Promise<InjectedPiece[] | undefined> {
   const scopes = await ctx.memory.resolveScopes(cwd)
   const pieces: InjectedPiece[] = []
   for (const scope of scopes) {
     const persona = await ctx.memory.readPersona(scope, cwd)
     if (persona !== undefined && persona.text.trim() !== '') {
-      pieces.push({ scope, dir: persona.dir, path: persona.path, text: persona.text })
+      pieces.push({ kind: 'persona', scope, dir: persona.dir, path: persona.path, text: persona.text })
     }
   }
-  if (scopes.includes('project')) {
-    const recent = await ctx.memory.recent({ limit: config.recentNoteCount }, cwd)
-    for (const note of recent.notes) {
-      pieces.push({ scope: 'project', dir: recent.dir, path: note.path, title: note.title, text: note.body })
+  for (const scope of scopes) {
+    const listed = await ctx.memory.list(scope, cwd)
+    for (const note of listed.notes) {
+      if (note.persona) continue
+      pieces.push({
+        kind: 'catalog',
+        scope,
+        dir: listed.dir,
+        path: note.path,
+        title: note.title,
+        tags: note.tags,
+        updated: note.updated,
+        excerpt: note.excerpt,
+      })
     }
   }
   return pieces.length === 0 ? undefined : pieces
@@ -67,21 +101,28 @@ export async function loadInjectionPieces(
 
 /**
  * Render loaded pieces into one complete model-facing context: persona notes
- * first (project, then global), then the recency window under its own heading.
+ * first (project, then global), then the note catalog under its own heading,
+ * newest first per scope.
  * @param pieces - loaded pieces in desired order.
  * @returns the rendered text.
  */
 export function renderInjection(pieces: readonly InjectedPiece[]): string {
-  const personas = pieces.filter(piece => piece.title === undefined)
-  const notes = pieces.filter(piece => piece.title !== undefined)
+  const personas = pieces.filter((piece): piece is InjectedPersona => piece.kind === 'persona')
+  const catalog = pieces.filter((piece): piece is InjectedCatalogEntry => piece.kind === 'catalog')
   const lines: string[] = [INJECTION_HEADING]
   for (const persona of personas) {
     lines.push('', `## Persona (${persona.scope})`, '', persona.text.trim())
   }
-  if (notes.length > 0) {
-    lines.push('', '## Recent project notes')
-    for (const note of notes) {
-      lines.push('', `### ${note.title}`, note.text.trim())
+  if (catalog.length > 0) {
+    lines.push('', `## ${CATALOG_HEADING}`)
+    for (const note of catalog) {
+      lines.push(
+        '',
+        `### ${note.title} (${note.scope})`,
+        `Tags: ${note.tags.join(', ') || '(none)'}`,
+        `Updated: ${isoDay(note.updated)}`,
+        note.excerpt,
+      )
     }
   }
   return lines.join('\n')
@@ -103,7 +144,7 @@ export function buildInjectionText(pieces: readonly InjectedPiece[], maxBytes: n
     scope: piece.scope,
     dir: piece.dir,
     path: piece.path,
-    ...(piece.title === undefined ? {} : { title: piece.title }),
+    ...(piece.kind === 'persona' ? {} : { title: piece.title }),
   }))
   if (byteLength(full) <= maxBytes) return { text: full, refs }
   const markerBytes = byteLength(TRUNCATION_MARKER)

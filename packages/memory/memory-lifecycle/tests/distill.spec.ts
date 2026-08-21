@@ -1,13 +1,12 @@
 import { Context } from '@deepseek-ai/cordis'
 import { createAssistantMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
-import { MemoryError, MemoryNoteId } from '@deepseek-ai/dsh-memory'
-import type { MemoryNote } from '@deepseek-ai/dsh-memory'
+import { MemoryNoteId } from '@deepseek-ai/dsh-memory'
 import { Session, SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { CONCISE_INSTRUCTION, DETAILED_INSTRUCTION, distillInstruction, journalDate, runDistill, resolveDistillRoute, turnMessages, turnTextLength } from '../src/distill.ts'
 import { resolveConfig } from '../src/config.ts'
-import { DISTILL_INSTRUCTION, runDistill, resolveDistillRoute, turnMessages, turnTextLength, mergeNote } from '../src/distill.ts'
 import type { DistillTarget } from '../src/distill.ts'
 
 const PROVIDER = 'deepseek'
@@ -54,32 +53,30 @@ function fakeLlm(reply: string, error?: Error) {
 
 const captured: GenerateOptions[] = []
 
-const NOTE: MemoryNote = {
-  id: MemoryNoteId('n1'),
-  scope: 'project',
-  title: 'Existing',
-  path: 'notes/existing.md',
-  tags: ['old'],
-  body: 'Old facts.',
-  related: [{ title: 'Old link' }],
-  backlinks: [],
-}
-
 function fakeMemory(overrides: Record<string, unknown> = {}) {
   return {
     resolveScopes: vi.fn(async () => ['project', 'global']),
-    readInScope: vi.fn(async () => {
-      throw new MemoryError('no match', 'NOT_FOUND')
-    }),
-    write: vi.fn(async (input: { id?: string; scope: string; title: string }) => ({
-      id: input.id ?? MemoryNoteId('fresh'),
-      scope: input.scope as 'project' | 'global',
-      title: input.title,
-      path: `notes/${input.title.toLowerCase().replaceAll(' ', '-')}.md`,
-      created: 't0',
-      updated: 't1',
+    commitDistill: vi.fn(async (groups: Array<{ scope: 'project' | 'global'; date: string; journalTitle: string; notes: Array<{ title: string }> }>) => ({
+      notes: groups.flatMap(group => group.notes.map((note, index) => {
+        const suffix = `${group.scope}-${index}`
+        return {
+          id: MemoryNoteId(`${group.scope}-${index}`),
+          scope: group.scope,
+          title: note.title,
+          path: `notes/${note.title.toLowerCase().replaceAll(' ', '-')}-${suffix}.md`,
+          created: 't0',
+          updated: 't1',
+          journalAnchor: `^memory-${suffix}`,
+        }
+      })),
+      journals: groups.map(group => ({
+        scope: group.scope,
+        path: `journal/${group.date}.md`,
+        date: group.date,
+        title: group.journalTitle,
+        anchor: `^memory-${group.scope}-0`,
+      })),
     })),
-    appendJournal: vi.fn(async (input: { title: string }) => ({ path: 'journal/2026-08-18.md', date: '2026-08-18', title: input.title })),
     ...overrides,
   }
 }
@@ -134,28 +131,22 @@ describe('resolveDistillRoute', () => {
   })
 })
 
-describe('mergeNote', () => {
-  it('appends new facts and unions tags and related links', () => {
-    const merged = mergeNote(NOTE, { scope: 'project', title: 'Existing', content: 'New fact.', tags: ['new', 'old'], related: ['Fresh'] })
-    expect(merged?.body).toBe('Old facts.\n\nNew fact.')
-    expect(merged?.tags).toEqual(['old', 'new'])
-    expect(merged?.related).toEqual(['Old link', 'Fresh'])
+describe('distillInstruction', () => {
+  it('pins both fixed instruction texts and selects by mode', () => {
+    expect(distillInstruction('concise')).toBe(CONCISE_INSTRUCTION)
+    expect(distillInstruction('detailed')).toBe(DETAILED_INSTRUCTION)
+    expect(CONCISE_INSTRUCTION).toContain('extract only durable facts')
+    expect(DETAILED_INSTRUCTION).toContain('reuse a concise title')
+    expect(CONCISE_INSTRUCTION).not.toBe(DETAILED_INSTRUCTION)
+    expect(() => distillInstruction('verbose' as never)).toThrow()
   })
+})
 
-  it('skips related links and tags that already exist', () => {
-    const merged = mergeNote(NOTE, {
-      scope: 'project',
-      title: 'Existing',
-      content: 'New fact.',
-      tags: ['old', 'another'],
-      related: ['Old link', 'Fresh'],
-    })
-    expect(merged?.tags).toEqual(['old', 'another'])
-    expect(merged?.related).toEqual(['Old link', 'Fresh'])
-  })
-
-  it('writes nothing for a pure restatement', () => {
-    expect(mergeNote(NOTE, { scope: 'project', title: 'Existing', content: ' Old facts. ', tags: [], related: [] })).toBeUndefined()
+describe('journalDate', () => {
+  it('uses the configured local calendar day across a UTC boundary', () => {
+    const epoch = Date.parse('2026-08-20T23:30:00.000Z')
+    expect(journalDate(epoch, 'UTC')).toBe('2026-08-20')
+    expect(journalDate(epoch, 'Asia/Shanghai')).toBe('2026-08-21')
   })
 })
 
@@ -176,29 +167,34 @@ describe('runDistill', () => {
 
     await runDistill(ctx, resolveConfig(), target(session, end))
 
-    expect(memory.write).toHaveBeenCalledTimes(2)
-    expect(memory.write).toHaveBeenNthCalledWith(1, expect.objectContaining({
-      scope: 'project', title: 'Vitest setup', content: 'We use vitest for tests.', tags: ['testing'],
-    }), undefined)
-    expect(memory.write).toHaveBeenNthCalledWith(2, expect.objectContaining({ scope: 'global', title: 'User prefers tea' }), undefined)
-    expect(memory.appendJournal).toHaveBeenCalledWith(expect.objectContaining({
-      scope: 'project', title: 'Set up tests', body: '- Configured [[Vitest setup]].',
-    }), undefined)
+    expect(memory.commitDistill).toHaveBeenCalledWith([
+      expect.objectContaining({
+        scope: 'project', journalTitle: 'Set up tests',
+        notes: [expect.objectContaining({ title: 'Vitest setup', content: 'We use vitest for tests.', tags: ['testing'] })],
+      }),
+      expect.objectContaining({
+        scope: 'global', notes: [expect.objectContaining({ title: 'User prefers tea' })],
+      }),
+    ], undefined, expect.any(AbortSignal))
+    expect(memory.commitDistill.mock.calls[0]?.[0][0]?.date).toMatch(/^\d{4}-\d{2}-\d{2}$/)
 
     const replay = captured[0]!
     expect(replay.purpose).toBe('memory-distill')
-    expect(replay.maxTokens).toBe(1024)
-    expect(replay.messages.at(-1)?.content[0]).toMatchObject({ type: 'text', text: DISTILL_INSTRUCTION })
+    expect(replay.maxTokens).toBe(2048)
+    expect(replay.messages.at(-1)?.content[0]).toMatchObject({ type: 'text', text: CONCISE_INSTRUCTION })
 
     const distill = session.events.findLast(event => event.type === 'memory/distill')
     expect(distill?.type === 'memory/distill' && distill.data).toMatchObject({
       turn: 1,
       model: { provider: PROVIDER, model: MODEL },
       notes: [
-        { action: 'create', scope: 'project', title: 'Vitest setup', path: 'notes/vitest-setup.md' },
-        { action: 'create', scope: 'global', title: 'User prefers tea' },
+        { scope: 'project', title: 'Vitest setup' },
+        { scope: 'global', title: 'User prefers tea' },
       ],
-      journal: { scope: 'project', path: 'journal/2026-08-18.md', date: '2026-08-18', title: 'Set up tests' },
+      journals: [
+        { scope: 'project', title: 'Set up tests' },
+        { scope: 'global', title: 'Set up tests' },
+      ],
     })
     await ctx.fiber.dispose()
   })
@@ -216,12 +212,13 @@ describe('runDistill', () => {
 
     await runDistill(ctx, resolveConfig(), target(session, end))
 
-    expect(memory.write).toHaveBeenCalledWith(expect.objectContaining({ scope: 'global' }), undefined)
-    expect(memory.appendJournal).toHaveBeenCalledWith(expect.objectContaining({ scope: 'global' }), undefined)
+    expect(memory.commitDistill).toHaveBeenCalledWith([
+      expect.objectContaining({ scope: 'global', notes: [expect.objectContaining({ title: 'Personal fact' })] }),
+    ], undefined, expect.any(AbortSignal))
     await ctx.fiber.dispose()
   })
 
-  it('merges into an existing note and skips pure restatements', async () => {
+  it('passes repeated titles as additive candidates instead of reading or merging old nodes', async () => {
     const ctx = new Context()
     const reply = JSON.stringify({
       notes: [
@@ -230,45 +227,37 @@ describe('runDistill', () => {
       ],
       journal: { title: 'Day', body: '- b' },
     })
-    const memory = fakeMemory({
-      readInScope: vi.fn(async (title: string) => title === 'Existing' ? NOTE : Promise.reject(new MemoryError('no', 'NOT_FOUND'))),
-    })
+    const memory = fakeMemory()
     ctx.provide('memory', memory)
     ctx.provide('llm', fakeLlm(reply))
     const { session, end } = finishedTurnSession()
 
     await runDistill(ctx, resolveConfig(), target(session, end))
 
-    expect(memory.write).toHaveBeenCalledTimes(1)
-    expect(memory.write).toHaveBeenCalledWith(expect.objectContaining({
-      id: MemoryNoteId('n1'), scope: 'project', content: 'Old facts.\n\nNew fact.',
-    }), undefined)
+    expect(memory.commitDistill).toHaveBeenCalledWith([
+      expect.objectContaining({ notes: [
+        expect.objectContaining({ title: 'Existing', content: 'New fact.' }),
+        expect.objectContaining({ title: 'Existing', content: 'Old facts.' }),
+      ] }),
+    ], undefined, expect.any(AbortSignal))
     const distill = session.events.findLast(event => event.type === 'memory/distill')
-    expect(distill?.type === 'memory/distill' && distill.data.notes).toEqual([
-      expect.objectContaining({ action: 'merge', id: 'n1' }),
-    ])
+    expect(distill?.type === 'memory/distill' && distill.data.notes).toHaveLength(2)
     await ctx.fiber.dispose()
   })
 
-  it('records committed notes with the error when the journal append fails', async () => {
+  it('publishes no receipt when the whole-turn commit fails', async () => {
     const ctx = new Context()
     const reply = JSON.stringify({
       notes: [{ scope: 'global', title: 'Fact', content: 'Something.', tags: [], related: [] }],
       journal: { title: 'Day', body: '- b' },
     })
-    const memory = fakeMemory({ appendJournal: vi.fn(async () => { throw new Error('disk full') }) })
+    const memory = fakeMemory({ commitDistill: vi.fn(async () => { throw new Error('disk full') }) })
     ctx.provide('memory', memory)
     ctx.provide('llm', fakeLlm(reply))
     const { session, end } = finishedTurnSession()
 
-    await runDistill(ctx, resolveConfig(), target(session, end))
-
-    const distill = session.events.findLast(event => event.type === 'memory/distill')
-    expect(distill?.type === 'memory/distill' && distill.data).toMatchObject({
-      notes: [{ action: 'create', title: 'Fact' }],
-      error: 'Error: disk full',
-    })
-    expect(distill?.type === 'memory/distill' && distill.data.journal).toBeUndefined()
+    await expect(runDistill(ctx, resolveConfig(), target(session, end))).rejects.toThrow('disk full')
+    expect(session.events.some(event => event.type === 'memory/distill')).toBe(false)
     await ctx.fiber.dispose()
   })
 
@@ -286,7 +275,7 @@ describe('runDistill', () => {
     const end = session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
 
     await expect(runDistill(ctx, resolveConfig(), target(session, end))).rejects.toThrow('no auxiliary route')
-    expect(memory.write).not.toHaveBeenCalled()
+    expect(memory.commitDistill).not.toHaveBeenCalled()
     expect(session.events.some(event => event.type === 'memory/distill')).toBe(false)
     await ctx.fiber.dispose()
   })
@@ -329,19 +318,20 @@ describe('runDistill', () => {
     const { session, end } = finishedTurnSession()
 
     await expect(runDistill(ctx, resolveConfig(), target(session, end))).rejects.toThrow('requires a notes array')
-    expect(memory.write).not.toHaveBeenCalled()
+    expect(memory.commitDistill).not.toHaveBeenCalled()
     await ctx.fiber.dispose()
   })
 
-  it('throws when nothing committed and the journal append fails', async () => {
+  it('writes no node, journal, or receipt when the model returns zero candidates', async () => {
     const ctx = new Context()
     const reply = JSON.stringify({ notes: [], journal: { title: 'Day', body: '- b' } })
-    const memory = fakeMemory({ appendJournal: vi.fn(async () => { throw new Error('disk full') }) })
+    const memory = fakeMemory()
     ctx.provide('memory', memory)
     ctx.provide('llm', fakeLlm(reply))
     const { session, end } = finishedTurnSession()
 
-    await expect(runDistill(ctx, resolveConfig(), target(session, end))).rejects.toThrow('disk full')
+    await runDistill(ctx, resolveConfig(), target(session, end))
+    expect(memory.commitDistill).not.toHaveBeenCalled()
     expect(session.events.some(event => event.type === 'memory/distill')).toBe(false)
     await ctx.fiber.dispose()
   })
@@ -407,24 +397,6 @@ describe('runDistill', () => {
     const replay = captured[0]!
     expect(replay.system).toBe('the session system prompt')
     expect(replay.tools).toEqual([{ name: 'memory_search', description: 'Search memory.', parameters: {} }])
-    await ctx.fiber.dispose()
-  })
-
-  it('propagates non-NOT_FOUND lookup failures', async () => {
-    const ctx = new Context()
-    const reply = JSON.stringify({
-      notes: [{ scope: 'global', title: 'Fact', content: 'Something.', tags: [], related: [] }],
-      journal: { title: 'Day', body: '- b' },
-    })
-    const memory = fakeMemory({
-      readInScope: vi.fn(async () => { throw new MemoryError('no memory provider is registered', 'NO_PROVIDER') }),
-    })
-    ctx.provide('memory', memory)
-    ctx.provide('llm', fakeLlm(reply))
-    const { session, end } = finishedTurnSession()
-
-    await expect(runDistill(ctx, resolveConfig(), target(session, end))).rejects.toThrow('no memory provider')
-    expect(session.events.some(event => event.type === 'memory/distill')).toBe(false)
     await ctx.fiber.dispose()
   })
 })

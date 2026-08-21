@@ -23,7 +23,7 @@ function selectiveRegistry(registered: string): FakeRegistry {
     : Promise.reject(new Error(`no workspace for ${path}`))) }
 }
 
-type ProviderSpies = Pick<MemoryProvider, 'write' | 'read' | 'search' | 'traverse' | 'readPersona' | 'recentNotes' | 'appendJournal'>
+type ProviderSpies = Pick<MemoryProvider, 'write' | 'read' | 'search' | 'traverse' | 'readPersona' | 'recentNotes' | 'appendJournal' | 'commitDistill' | 'listNotes' | 'delete'>
 
 function fakeProvider(overrides: Partial<MemoryProvider> = {}): ProviderSpies & { provider: MemoryProvider } {
   const note: MemoryNote = {
@@ -33,6 +33,7 @@ function fakeProvider(overrides: Partial<MemoryProvider> = {}): ProviderSpies & 
     path: 'notes/a-note.md',
     tags: [],
     body: 'body',
+    updated: 1,
     related: [],
     backlinks: [],
   }
@@ -52,9 +53,14 @@ function fakeProvider(overrides: Partial<MemoryProvider> = {}): ProviderSpies & 
   const readPersona = overrides.readPersona ?? vi.fn(async () => ({ path: 'MEMORY.md', text: 'persona' }))
   const recentNotes = overrides.recentNotes ?? vi.fn(async () => [{ path: 'notes/recent.md', title: 'Recent', body: 'b', updated: 1 }])
   const appendJournal = overrides.appendJournal ?? vi.fn(async () => ({ path: 'journal/2026-08-18.md', date: '2026-08-18' }))
+  const commitDistill = overrides.commitDistill ?? vi.fn(async () => ({ notes: [], journals: [] }))
+  const listNotes = overrides.listNotes ?? vi.fn(async () => [{
+    id: MemoryNoteId('n1'), path: 'notes/a-note.md', title: 'A note', tags: [], updated: 1, excerpt: 'body', persona: false,
+  }])
+  const del = overrides.delete ?? vi.fn(async () => ({ id: MemoryNoteId('n1'), title: 'A note', path: 'notes/a-note.md', trashPath: '/trash/a-note.md' }))
   return {
-    provider: { write, read, search, traverse, readPersona, recentNotes, appendJournal },
-    write, read, search, traverse, readPersona, recentNotes, appendJournal,
+    provider: { write, read, search, traverse, readPersona, recentNotes, appendJournal, commitDistill, listNotes, delete: del },
+    write, read, search, traverse, readPersona, recentNotes, appendJournal, commitDistill, listNotes, delete: del,
   }
 }
 
@@ -107,6 +113,10 @@ describe('MemoryService', () => {
     expect(() => ctx.memory.register({} as never)).toThrow('memory provider must implement write()')
     expect(() => ctx.memory.register('provider' as never)).toThrow('memory provider must be an object')
     expect(() => ctx.memory.register({ write: () => {} } as never)).toThrow('memory provider must implement read()')
+    expect(() => ctx.memory.register({
+      write: () => {}, read: () => {}, search: () => {}, traverse: () => {},
+      readPersona: () => {}, recentNotes: () => {}, appendJournal: () => {}, commitDistill: () => {},
+    } as never)).toThrow('memory provider must implement listNotes()')
     await ctx.fiber.dispose()
   })
 
@@ -294,6 +304,35 @@ describe('MemoryService', () => {
     await ctx.fiber.dispose()
   })
 
+  it('routes whole-turn distillation commits through resolved vault dirs', async () => {
+    const ctx = await mounted()
+    const cwd = join(HOME, 'work', 'proj')
+    ctx.provide('workspaceRegistry', selectiveRegistry(cwd))
+    const { provider, commitDistill } = fakeProvider()
+    ctx.memory.register(provider)
+
+    await ctx.memory.commitDistill([
+      { scope: 'project', date: '2026-08-20', journalTitle: 'T', journalBody: '- b', notes: [{ title: 'A', content: 'a' }] },
+      { scope: 'global', date: '2026-08-20', journalTitle: 'T', journalBody: '- b', notes: [{ title: 'B', content: 'b' }] },
+    ], cwd)
+
+    expect(commitDistill).toHaveBeenCalledWith(expect.any(Array), {
+      project: join(cwd, PROJECT_MEMORY_DIR),
+      global: join(HOME, 'memory'),
+    }, undefined)
+    await ctx.memory.commitDistill([
+      { scope: 'global', date: '2026-08-20', journalTitle: 'G', journalBody: '- b', notes: [{ title: 'B', content: 'b' }] },
+    ], undefined)
+    expect(commitDistill).toHaveBeenLastCalledWith(expect.any(Array), {
+      project: undefined,
+      global: join(HOME, 'memory'),
+    }, undefined)
+    await expect(ctx.memory.commitDistill([
+      { scope: 'project', date: '2026-08-20', journalTitle: 'T', journalBody: '- b', notes: [{ title: 'A', content: 'a' }] },
+    ], undefined)).rejects.toMatchObject({ code: 'NO_PROJECT_SCOPE' })
+    await ctx.fiber.dispose()
+  })
+
   it('returns no persona when the vault has no MEMORY.md', async () => {
     const ctx = await mounted()
     const { provider } = fakeProvider({ readPersona: vi.fn(async () => undefined) })
@@ -310,6 +349,112 @@ describe('MemoryService', () => {
     controller.abort(new Error('caller aborted'))
     await expect(ctx.memory.appendJournal({ scope: 'global', title: 't', body: 'b' }, undefined, controller.signal)).rejects.toThrow('caller aborted')
     expect(appendJournal).not.toHaveBeenCalled()
+    await ctx.fiber.dispose()
+  })
+
+  it('routes listings by scope with the provider cap contract intact', async () => {
+    const ctx = await mounted()
+    const cwd = join(HOME, 'work', 'proj')
+    ctx.provide('workspaceRegistry', selectiveRegistry(cwd))
+    const { provider, listNotes } = fakeProvider()
+    ctx.memory.register(provider)
+
+    const global = await ctx.memory.list('global', undefined, { limit: 7 })
+    expect(global).toEqual({
+      dir: join(HOME, 'memory'),
+      scope: 'global',
+      notes: [{ id: 'n1', path: 'notes/a-note.md', title: 'A note', tags: [], updated: 1, excerpt: 'body', persona: false }],
+    })
+    expect(listNotes).toHaveBeenCalledWith({ limit: 7 }, join(HOME, 'memory'), undefined)
+
+    await ctx.memory.list('project', cwd)
+    expect(listNotes).toHaveBeenLastCalledWith(undefined, join(cwd, PROJECT_MEMORY_DIR), undefined)
+
+    await expect(ctx.memory.list('project', undefined)).rejects.toMatchObject({ code: 'NO_PROJECT_SCOPE' })
+    await ctx.fiber.dispose()
+  })
+
+  it('searches within exactly one vault for per-tab consumers', async () => {
+    const ctx = await mounted()
+    const cwd = join(HOME, 'work', 'proj')
+    ctx.provide('workspaceRegistry', selectiveRegistry(cwd))
+    const { provider, search } = fakeProvider()
+    ctx.memory.register(provider)
+
+    await ctx.memory.searchInScope('q', { limit: 3 }, 'global', undefined)
+    expect(search).toHaveBeenCalledWith('q', { limit: 3 }, [join(HOME, 'memory')], undefined)
+
+    await ctx.memory.searchInScope('q', undefined, 'project', cwd)
+    expect(search).toHaveBeenLastCalledWith('q', undefined, [join(cwd, PROJECT_MEMORY_DIR)], undefined)
+
+    await expect(ctx.memory.searchInScope('q', undefined, 'project', undefined)).rejects.toMatchObject({ code: 'NO_PROJECT_SCOPE' })
+    await ctx.fiber.dispose()
+  })
+
+  it('resolves a scope-less delete across the chain, first hit wins', async () => {
+    const ctx = await mounted()
+    const cwd = join(HOME, 'work', 'proj')
+    ctx.provide('workspaceRegistry', selectiveRegistry(cwd))
+    const notFound = new MemoryError('no memory note matches "n1"', 'NOT_FOUND')
+    const { provider, delete: del } = fakeProvider({
+      delete: vi.fn(async (ref: string, dir: string) => {
+        if (ref === 'missing' || dir === join(cwd, PROJECT_MEMORY_DIR)) throw notFound
+        return { id: MemoryNoteId('n1'), title: 'A note', path: 'notes/a-note.md', trashPath: join(dir, 'x.md') }
+      }),
+    })
+    ctx.memory.register(provider)
+
+    const result = await ctx.memory.delete('n1', undefined, cwd)
+    expect(result).toEqual({ id: 'n1', scope: 'global', title: 'A note', path: 'notes/a-note.md', trashPath: join(HOME, 'memory', 'x.md') })
+    expect(del).toHaveBeenCalledTimes(2)
+
+    await expect(ctx.memory.delete('missing', undefined, cwd)).rejects.toMatchObject({ code: 'NOT_FOUND' })
+    await ctx.fiber.dispose()
+  })
+
+  it('routes an explicit-scope delete with its options to the exact vault', async () => {
+    const ctx = await mounted()
+    const cwd = join(HOME, 'work', 'proj')
+    ctx.provide('workspaceRegistry', selectiveRegistry(cwd))
+    const { provider, delete: del } = fakeProvider({
+      delete: vi.fn(async () => ({ id: MemoryNoteId('n1'), title: 'A note', path: 'notes/a-note.md' })),
+    })
+    ctx.memory.register(provider)
+
+    const result = await ctx.memory.delete('n1', 'project', cwd, undefined, { mode: 'permanent' })
+    expect(result).toEqual({ id: 'n1', scope: 'project', title: 'A note', path: 'notes/a-note.md' })
+    expect(del).toHaveBeenCalledWith('n1', join(cwd, PROJECT_MEMORY_DIR), undefined, { mode: 'permanent' })
+
+    const global = await ctx.memory.delete('n1', 'global', undefined)
+    expect(global.scope).toBe('global')
+    expect(del).toHaveBeenLastCalledWith('n1', join(HOME, 'memory'), undefined, undefined)
+
+    await expect(ctx.memory.delete('n1', 'project', undefined)).rejects.toMatchObject({ code: 'NO_PROJECT_SCOPE' })
+    await ctx.fiber.dispose()
+  })
+
+  it('reports project scope when a scope-less delete hits the chain head', async () => {
+    const ctx = await mounted()
+    const cwd = join(HOME, 'work', 'proj')
+    ctx.provide('workspaceRegistry', selectiveRegistry(cwd))
+    const { provider } = fakeProvider()
+    ctx.memory.register(provider)
+    const result = await ctx.memory.delete('n1', undefined, cwd)
+    expect(result.scope).toBe('project')
+    await ctx.fiber.dispose()
+  })
+
+  it('exposes the configured global vault directory through info()', async () => {
+    const ctx = await mounted({ dir: join(HOME, 'custom-vault') })
+    expect(ctx.memory.info()).toEqual({ globalDir: join(HOME, 'custom-vault') })
+    await ctx.fiber.dispose()
+  })
+
+  it('fails listing and deletion loudly without a registered provider', async () => {
+    const ctx = await mounted()
+    await expect(ctx.memory.list('global', undefined)).rejects.toMatchObject({ code: 'NO_PROVIDER' })
+    await expect(ctx.memory.searchInScope('q', undefined, 'global', undefined)).rejects.toMatchObject({ code: 'NO_PROVIDER' })
+    await expect(ctx.memory.delete('n1', undefined, undefined)).rejects.toMatchObject({ code: 'NO_PROVIDER' })
     await ctx.fiber.dispose()
   })
 })

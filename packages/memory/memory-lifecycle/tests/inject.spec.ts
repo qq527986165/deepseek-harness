@@ -1,71 +1,86 @@
 import { Context } from '@deepseek-ai/cordis'
 import { describe, expect, it, vi } from 'vitest'
-import { resolveConfig } from '../src/config.ts'
 import { buildInjectionText, loadInjectionPieces, renderInjection } from '../src/inject.ts'
-import type { InjectedPiece } from '../src/inject.ts'
+import type { InjectedCatalogEntry, InjectedPersona } from '../src/inject.ts'
 
-const PERSONA = (scope: 'project' | 'global', text: string): InjectedPiece => ({
+const PERSONA = (scope: 'project' | 'global', text: string): InjectedPersona => ({
+  kind: 'persona',
   scope,
   dir: `C:/vaults/${scope}`,
   path: 'MEMORY.md',
   text,
 })
 
-const NOTE = (title: string, body: string): InjectedPiece => ({
-  scope: 'project',
-  dir: 'C:/vaults/project',
+const ENTRY = (scope: 'project' | 'global', title: string, overrides: Partial<InjectedCatalogEntry> = {}): InjectedCatalogEntry => ({
+  kind: 'catalog',
+  scope,
+  dir: `C:/vaults/${scope}`,
   path: `notes/${title.toLowerCase().replaceAll(' ', '-')}.md`,
   title,
-  text: body,
+  tags: [],
+  updated: 1,
+  excerpt: 'Body.',
+  ...overrides,
 })
 
 function fakeMemory(overrides: Record<string, unknown> = {}) {
   return {
     resolveScopes: vi.fn(async () => ['project', 'global']),
     readPersona: vi.fn(async (scope: 'project' | 'global') => PERSONA(scope, `Persona of ${scope}.`)),
-    recent: vi.fn(async () => ({ dir: 'C:/vaults/project', notes: [{ path: 'notes/recent.md', title: 'Recent', body: 'Body.', updated: 1 }] })),
+    list: vi.fn(async (scope: 'project' | 'global') => ({
+      dir: `C:/vaults/${scope}`,
+      scope,
+      notes: scope === 'project'
+        ? [{ id: 'n1', path: 'notes/recent.md', title: 'Recent', tags: ['a'], updated: 1, excerpt: 'Body.', persona: false }]
+        : [{ id: 'n2', path: 'notes/global.md', title: 'Global note', tags: [], updated: 2, excerpt: 'More.', persona: false }],
+    })),
     ...overrides,
   }
 }
 
 describe('loadInjectionPieces', () => {
-  it('loads both personas in scope order plus the project recency window', async () => {
+  it('loads both personas in scope order plus each scope note catalog', async () => {
     const ctx = new Context()
     ctx.provide('memory', fakeMemory())
-    const pieces = await loadInjectionPieces(ctx, 'C:/work/proj', resolveConfig())
-    expect(pieces?.map(piece => piece.path)).toEqual(['MEMORY.md', 'MEMORY.md', 'notes/recent.md'])
-    expect(pieces?.map(piece => piece.scope)).toEqual(['project', 'global', 'project'])
+    const pieces = await loadInjectionPieces(ctx, 'C:/work/proj')
+    expect(pieces?.map(piece => piece.path)).toEqual(['MEMORY.md', 'MEMORY.md', 'notes/recent.md', 'notes/global.md'])
+    expect(pieces?.map(piece => piece.scope)).toEqual(['project', 'global', 'project', 'global'])
+    expect(pieces?.[2]).toMatchObject({ kind: 'catalog', title: 'Recent', tags: ['a'], updated: 1, excerpt: 'Body.' })
     await ctx.fiber.dispose()
   })
 
-  it('skips empty persona files and global-only sessions skip recency', async () => {
+  it('skips empty persona files and loads an empty catalog for a bare vault', async () => {
     const ctx = new Context()
     const memory = fakeMemory({
       resolveScopes: vi.fn(async () => ['global']),
       readPersona: vi.fn(async (scope: 'project' | 'global') => scope === 'global' ? PERSONA('global', 'Global.') : PERSONA('project', '   ')),
+      list: vi.fn(async () => ({ dir: 'C:/vaults/global', scope: 'global', notes: [] })),
     })
     ctx.provide('memory', memory)
-    const pieces = await loadInjectionPieces(ctx, undefined, resolveConfig())
+    const pieces = await loadInjectionPieces(ctx, undefined)
     expect(pieces?.map(piece => piece.scope)).toEqual(['global'])
-    expect(memory.recent).not.toHaveBeenCalled()
+    expect(pieces?.length).toBe(1)
     await ctx.fiber.dispose()
   })
 
   it('returns undefined when nothing exists to inject', async () => {
     const ctx = new Context()
-    ctx.provide('memory', fakeMemory({ readPersona: vi.fn(async () => undefined), recent: vi.fn(async () => ({ dir: 'd', notes: [] })) }))
-    await expect(loadInjectionPieces(ctx, 'C:/work/proj', resolveConfig())).resolves.toBeUndefined()
+    ctx.provide('memory', fakeMemory({
+      readPersona: vi.fn(async () => undefined),
+      list: vi.fn(async () => ({ dir: 'd', scope: 'project', notes: [] })),
+    }))
+    await expect(loadInjectionPieces(ctx, 'C:/work/proj')).resolves.toBeUndefined()
     await ctx.fiber.dispose()
   })
 })
 
 describe('renderInjection', () => {
-  it('renders personas then a recency section, journal never included', () => {
+  it('renders personas then the note catalog with structured fields', () => {
     const text = renderInjection([
       PERSONA('project', 'Project rules.'),
       PERSONA('global', 'Global identity.'),
-      NOTE('Vitest setup', 'We use vitest.'),
-      NOTE('Other', 'More facts.'),
+      ENTRY('project', 'Vitest setup', { tags: ['testing'], updated: 1_754_006_400_000, excerpt: 'We use vitest.' }),
+      ENTRY('global', 'Other', { excerpt: 'More facts.' }),
     ])
     expect(text).toBe([
       'Memory context',
@@ -78,12 +93,16 @@ describe('renderInjection', () => {
       '',
       'Global identity.',
       '',
-      '## Recent project notes',
+      '## Memory note catalog',
       '',
-      '### Vitest setup',
+      '### Vitest setup (project)',
+      'Tags: testing',
+      'Updated: 2025-08-01',
       'We use vitest.',
       '',
-      '### Other',
+      '### Other (global)',
+      'Tags: (none)',
+      'Updated: 1970-01-01',
       'More facts.',
     ].join('\n'))
   })
@@ -97,8 +116,8 @@ describe('buildInjectionText', () => {
     expect(built?.refs).toEqual([{ scope: 'global', dir: 'C:/vaults/global', path: 'MEMORY.md' }])
   })
 
-  it('carries topic-note titles in refs', () => {
-    const built = buildInjectionText([PERSONA('global', 'P.'), NOTE('Vitest', 'Body.')], 10_000)
+  it('carries catalog entry titles in refs', () => {
+    const built = buildInjectionText([PERSONA('global', 'P.'), ENTRY('project', 'Vitest')], 10_000)
     expect(built?.refs).toEqual([
       { scope: 'global', dir: 'C:/vaults/global', path: 'MEMORY.md' },
       { scope: 'project', dir: 'C:/vaults/project', path: 'notes/vitest.md', title: 'Vitest' },

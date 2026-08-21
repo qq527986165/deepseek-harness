@@ -1,44 +1,75 @@
 /**
  * Every-turn distillation: one non-blocking auxiliary LLM call over the
- * finished turn, scope classification, merge-don't-restate writes, the journal
- * append, and the memory/distill write record.
+ * finished turn, scope classification, a verified whole-turn memory commit,
+ * and the memory/distill receipt.
  * @module @deepseek-ai/dsh-memory-lifecycle/distill
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { BlockAssembler, createUserMessage, LlmError } from '@deepseek-ai/dsh-llm'
+import { BlockAssembler, assertNever, createUserMessage, LlmError } from '@deepseek-ai/dsh-llm'
 import type { FinishReason, GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
-import { MemoryError } from '@deepseek-ai/dsh-memory'
-import type { MemoryNote, MemoryScope } from '@deepseek-ai/dsh-memory'
+import type { MemoryDistillCommitGroupInput, MemoryScope } from '@deepseek-ai/dsh-memory'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { deadline } from '@deepseek-ai/dsh-timeout'
-import type { ResolvedConfig } from './config.ts'
+import type { DistillMode, ResolvedConfig } from './config.ts'
 import { parseDistillOutput } from './parse.ts'
-import type { DistillCandidate, DistillOutput } from './parse.ts'
-import type { MemoryDistillJournalWrite, MemoryDistillNoteWrite } from './types.ts'
+import type { DistillOutput } from './parse.ts'
 
 /** Capability-owned timeout code for one auxiliary distillation call. */
 export const MEMORY_DISTILL_TIMEOUT_CODE = 'MEMORY_DISTILL_TIMEOUT'
 
 /**
- * The distillation directive, delivered as the final user message after the
- * replayed turn so the call is a genuine prefix of the last routed request and
- * reuses the provider's KV cache. One pass emits candidate topic notes, each
- * classified `project` or `global`, plus one journal entry linking the notes
- * it touched.
+ * The `concise` distillation directive, delivered as the final user message
+ * after the replayed turn so the call is a genuine prefix of the last routed
+ * request and reuses the provider's KV cache. One pass emits candidate topic
+ * notes, each classified `project` or `global`, plus one journal narrative.
+ * The host creates final node ids, paths, journal anchors, and links after the
+ * files commit.
  */
-export const DISTILL_INSTRUCTION = [
+export const CONCISE_INSTRUCTION = [
   'Act as the memory distillation engine for this AI coding assistant. Review the conversation ABOVE and extract only durable facts worth remembering across sessions.',
   '',
   'Output a single JSON object, nothing else, with exactly this schema:',
   '{"notes":[{"scope":"project","title":"...","content":"...","tags":[],"related":[]}],"journal":{"title":"...","body":"..."}}',
   '',
   'notes: one candidate per new durable fact cluster — user identity and standing preferences, project decisions, constraints. Classify each candidate: scope "global" ONLY for facts about the user that apply across projects (identity, preferences, cross-project rules); scope "project" for project-specific facts.',
-  'content: 1-3 plain sentences stating new facts; may use [[Note Title]] wikilinks to existing topics. Never restate facts already captured elsewhere: emit a candidate only when it adds something not already written.',
-  'journal: one short task narrative for the finished turn. title is the narrative heading; body is markdown bullets stating what happened and [[linking]] the topic notes this turn touched, without restating their facts.',
+  'content: 1-3 plain sentences stating new facts. Do not write wikilinks; the host will add final links after real files exist. Never restate facts already captured elsewhere: emit a candidate only when it adds something not already written.',
+  'journal: one short task narrative for the finished turn. title is the narrative heading; body is markdown bullets stating what happened, without wikilinks and without restating node facts.',
   'Return {"notes":[],"journal":{"title":"...","body":"..."}} when nothing new is worth remembering.',
   'Do NOT mention this request or take any other action. Output only the JSON object.',
 ].join('\n')
+
+/**
+ * The `detailed` distillation directive: the same JSON contract with a more
+ * thorough extraction policy — fuller fact coverage and related-note hints.
+ */
+export const DETAILED_INSTRUCTION = [
+  'Act as the memory distillation engine for this AI coding assistant. Review the conversation ABOVE thoroughly and extract every durable fact worth remembering across sessions, including fine-grained decisions, preferences, and constraints.',
+  '',
+  'Output a single JSON object, nothing else, with exactly this schema:',
+  '{"notes":[{"scope":"project","title":"...","content":"...","tags":[],"related":[]}],"journal":{"title":"...","body":"..."}}',
+  '',
+  'notes: one candidate per durable fact cluster — user identity and standing preferences, project decisions, constraints, and agreed tradeoffs. When a fact extends an existing topic, reuse a concise title and state only the NEW facts, never restating what is stored. Classify each candidate: scope "global" ONLY for facts about the user that apply across projects (identity, preferences, cross-project rules); scope "project" for project-specific facts.',
+  'content: 1-3 plain sentences stating new facts. Do not write wikilinks; the host will add final links after real files exist. Put same-scope related note titles in "related" where the facts connect.',
+  'journal: one short task narrative for the finished turn. title is the narrative heading; body is markdown bullets stating what happened, without wikilinks and without restating node facts.',
+  'Return {"notes":[],"journal":{"title":"...","body":"..."}} when nothing new is worth remembering.',
+  'Do NOT mention this request or take any other action. Output only the JSON object.',
+].join('\n')
+
+/**
+ * The fixed distillation instruction one mode selects. Both texts are pinned
+ * verbatim by tests: they are model-visible output, and the mode only selects
+ * between them.
+ * @param mode - the configured distillation mode.
+ * @returns the exact instruction text.
+ */
+export function distillInstruction(mode: DistillMode): string {
+  switch (mode) {
+    case 'concise': return CONCISE_INSTRUCTION
+    case 'detailed': return DETAILED_INSTRUCTION
+    default: return assertNever(mode, 'DistillMode')
+  }
+}
 
 /** Exact auxiliary route for one distillation call. */
 export interface DistillRoute {
@@ -54,11 +85,6 @@ export interface DistillTarget {
   /** Seq of the `turn/end` event closing the finished turn. */
   readonly endSeq: number
   readonly signal: AbortSignal
-}
-
-/** One committed pass: every topic-note write plus the journal append. */
-export interface CommittedDistill {
-  readonly journal: MemoryDistillJournalWrite
 }
 
 /**
@@ -124,39 +150,10 @@ export function turnTextLength(messages: readonly Message[]): number {
 }
 
 /**
- * Merge one candidate into an existing note: new facts append, tags and
- * related links union, and a candidate that only restates the existing body
- * writes nothing. The merged body keeps the existing text first, so reading a
- * note stays chronological.
- * @param existing - the note the candidate's title resolves to.
- * @param candidate - validated candidate facts.
- * @returns the merged body, tags, and related links, or `undefined` when the
- *   candidate adds nothing.
- */
-export function mergeNote(
-  existing: MemoryNote,
-  candidate: DistillCandidate,
-): { body: string; tags: string[]; related: string[] } | undefined {
-  const incoming = candidate.content.trim()
-  if (existing.body.includes(incoming)) return undefined
-  const tags = [...existing.tags]
-  for (const tag of candidate.tags) {
-    if (!tags.includes(tag)) tags.push(tag)
-  }
-  const related = existing.related.map(link => link.title)
-  for (const link of candidate.related) {
-    if (!related.includes(link)) related.push(link)
-  }
-  return { body: `${existing.body.trimEnd()}\n\n${incoming}`, tags, related }
-}
-
-/**
- * Run one distillation pass over the finished turn and append its write
- * record. Commits each candidate write and the journal append in order; a
- * failure after earlier commits still lands a `memory/distill` event carrying
- * the committed prefix and the error, so the log reconstructs every mutation.
- * A pass with no route, a too-short turn, or no committed write appends
- * nothing and reports through the returned failure instead.
+ * Run one distillation pass over the finished turn and append its committed
+ * receipt only after the provider verifies every created node, journal entry,
+ * index row, readback, and link. A pass with no route, a too-short turn, no
+ * durable candidates, or any commit failure appends no `memory/distill` event.
  * @param ctx - context carrying the memory and LLM services.
  * @param config - resolved lifecycle parameters.
  * @param target - finished-turn facts and cancellation.
@@ -172,7 +169,7 @@ export async function runDistill(ctx: Context, config: ResolvedConfig, target: D
   if (turnTextLength(messages) < config.minTurnChars) return
   const header = target.session.requestHeader()
   const instruction = createUserMessage({
-    content: [{ type: 'text', text: DISTILL_INSTRUCTION }],
+    content: [{ type: 'text', text: distillInstruction(config.distillMode) }],
     source: { kind: 'plugin', plugin: 'dsh-memory-lifecycle' },
   })
   using callDeadline = deadline(target.signal, config.distillTimeoutMs, MEMORY_DISTILL_TIMEOUT_CODE)
@@ -189,49 +186,26 @@ export async function runDistill(ctx: Context, config: ResolvedConfig, target: D
   }
   const output = await streamDistill(ctx, options, callDeadline.signal)
   callDeadline.signal.throwIfAborted()
-  const notes: MemoryDistillNoteWrite[] = []
-  let journal: MemoryDistillJournalWrite | undefined
-  try {
-    journal = await commitDistill(ctx, target, output, notes)
-  } catch (error: unknown) {
-    target.signal.throwIfAborted()
-    // `journal` stays undefined on every commit failure: it is only assigned
-    // once the journal append itself has succeeded.
-    if (notes.length === 0) throw error
-    target.session.append('memory/distill', {
-      turn: target.turn,
-      notes,
-      model: route,
-      error: String(error),
-    })
-    return
-  }
+  const committed = await commitDistill(ctx, target, output, config)
+  if (committed === undefined) return
   target.session.append('memory/distill', {
     turn: target.turn,
-    notes,
-    journal,
+    notes: committed.notes.map(note => ({
+      id: note.id,
+      scope: note.scope,
+      title: note.title,
+      path: note.path,
+      journalAnchor: note.journalAnchor,
+      ...(note.previous === undefined ? {} : { previous: note.previous }),
+    })),
+    journals: committed.journals,
     model: route,
   })
 }
 
 /** Run the auxiliary call and validate its reply into candidates. */
 async function streamDistill(ctx: Context, options: GenerateOptions, signal: AbortSignal): Promise<DistillOutput> {
-  const assembler = new BlockAssembler()
-  for await (const chunk of ctx.llm.stream(options)) {
-    signal.throwIfAborted()
-    assembler.push(chunk)
-  }
-  signal.throwIfAborted()
-  const terminal = finishError(assembler.finish)
-  if (terminal !== undefined) throw terminal
-  const blocks = assembler.blocks()
-  if (blocks.some(block => block.type === 'tool-call')) {
-    throw new LlmError('memory distillation output must contain text only', 'UNSUPPORTED_CONTENT')
-  }
-  const text = blocks
-    .filter((block): block is Extract<(typeof blocks)[number], { type: 'text' }> => block.type === 'text')
-    .map(block => block.text)
-    .join('\n')
+  const text = await streamTextOnly(ctx, options, signal, 'distillation')
   const output = parseDistillOutput(text)
   if (output === undefined) {
     throw new Error('memory-lifecycle: distillation output contains no JSON object')
@@ -239,15 +213,49 @@ async function streamDistill(ctx: Context, options: GenerateOptions, signal: Abo
   return output
 }
 
+/**
+ * Stream one auxiliary text-only reply and fail on any non-text content or
+ * terminal failure. Shared by the distillation and review calls, whose only
+ * difference is the contract the parsed text must satisfy.
+ * @param ctx - context carrying the LLM service.
+ * @param options - complete auxiliary generate options.
+ * @param signal - caller cancellation.
+ * @param kind - which auxiliary call streams, for diagnostics.
+ * @returns the assembled plain text.
+ */
+export async function streamTextOnly(
+  ctx: Context,
+  options: GenerateOptions,
+  signal: AbortSignal,
+  kind: 'distillation' | 'review',
+): Promise<string> {
+  const assembler = new BlockAssembler()
+  for await (const chunk of ctx.llm.stream(options)) {
+    signal.throwIfAborted()
+    assembler.push(chunk)
+  }
+  signal.throwIfAborted()
+  const terminal = finishError(assembler.finish, kind)
+  if (terminal !== undefined) throw terminal
+  const blocks = assembler.blocks()
+  if (blocks.some(block => block.type === 'tool-call')) {
+    throw new LlmError(`memory ${kind} output must contain text only`, 'UNSUPPORTED_CONTENT')
+  }
+  return blocks
+    .filter((block): block is Extract<(typeof blocks)[number], { type: 'text' }> => block.type === 'text')
+    .map(block => block.text)
+    .join('\n')
+}
+
 /** Translate terminal finish reasons into an auxiliary-call failure. */
-function finishError(finish: FinishReason): Error | undefined {
+function finishError(finish: FinishReason, kind: 'distillation' | 'review'): Error | undefined {
   switch (finish.kind) {
     case 'stop':
       return undefined
     case 'max-tokens':
-      return new Error('memory-lifecycle: distillation output reached maxDistillTokens')
+      return new Error(`memory-lifecycle: ${kind} output reached maxDistillTokens`)
     case 'tool-calls':
-      return new Error('memory-lifecycle: distillation model unexpectedly requested a tool')
+      return new Error(`memory-lifecycle: ${kind} model unexpectedly requested a tool`)
     case 'error':
     case 'aborted': {
       const error = new Error(finish.failure.message) as Error & { code?: string }
@@ -259,61 +267,56 @@ function finishError(finish: FinishReason): Error | undefined {
   }
 }
 
-/** Commit one pass's candidate writes and journal append in order. */
+/** Commit one pass's candidates through the provider-owned whole-turn writer. */
 async function commitDistill(
   ctx: Context,
   target: DistillTarget,
   output: DistillOutput,
-  notes: MemoryDistillNoteWrite[],
-): Promise<MemoryDistillJournalWrite> {
+  config: ResolvedConfig,
+): Promise<Awaited<ReturnType<typeof ctx.memory.commitDistill>> | undefined> {
+  if (output.notes.length === 0) return undefined
   const scopes = await ctx.memory.resolveScopes(target.cwd)
   const project = scopes.includes('project')
+  const date = journalDate(Date.now(), config.timeZone)
+  const groups = new Map<MemoryScope, MemoryDistillCommitGroupInput>()
   for (const candidate of output.notes) {
     const scope: MemoryScope = candidate.scope === 'project' && !project ? 'global' : candidate.scope
-    const existing = await findInScope(ctx, target, candidate.title, scope)
-    if (existing === undefined) {
-      const written = await ctx.memory.write({
-        scope,
-        title: candidate.title,
-        content: candidate.content,
-        ...(candidate.tags.length > 0 ? { tags: candidate.tags } : {}),
-        ...(candidate.related.length > 0 ? { related: candidate.related } : {}),
-      }, target.cwd)
-      notes.push({ id: written.id, scope, title: written.title, path: written.path, action: 'create' })
-      continue
-    }
-    const merged = mergeNote(existing, candidate)
-    if (merged === undefined) continue
-    const written = await ctx.memory.write({
-      id: existing.id,
+    const current = groups.get(scope) ?? {
       scope,
-      title: candidate.title,
-      content: merged.body,
-      tags: merged.tags,
-      related: merged.related,
-    }, target.cwd)
-    notes.push({ id: written.id, scope, title: written.title, path: written.path, action: 'merge' })
+      date,
+      journalTitle: output.journal.title,
+      journalBody: output.journal.body,
+      notes: [],
+    }
+    groups.set(scope, {
+      ...current,
+      notes: [
+        ...current.notes,
+        {
+          title: candidate.title,
+          content: candidate.content,
+          ...(candidate.tags.length > 0 ? { tags: candidate.tags } : {}),
+          ...(candidate.related.length > 0 ? { related: candidate.related } : {}),
+        },
+      ],
+    })
   }
-  const journalScope: MemoryScope = project ? 'project' : 'global'
-  const appended = await ctx.memory.appendJournal({
-    scope: journalScope,
-    title: output.journal.title,
-    body: output.journal.body,
-  }, target.cwd)
-  return { scope: journalScope, path: appended.path, date: appended.date, title: output.journal.title }
+  return await ctx.memory.commitDistill([...groups.values()], target.cwd, target.signal)
 }
 
-/** Resolve an existing note by exact title within one scope's vault. */
-async function findInScope(
-  ctx: Context,
-  target: DistillTarget,
-  title: string,
-  scope: MemoryScope,
-): Promise<MemoryNote | undefined> {
-  try {
-    return await ctx.memory.readInScope(title, scope, target.cwd)
-  } catch (error: unknown) {
-    if (error instanceof MemoryError && error.code === 'NOT_FOUND') return undefined
-    throw error
-  }
+/**
+ * Format one epoch millisecond as `YYYY-MM-DD` in a configured timezone.
+ * @param epoch - timestamp in epoch milliseconds.
+ * @param timeZone - IANA timezone used for the calendar day.
+ * @returns ISO calendar date for that timezone.
+ */
+export function journalDate(epoch: number, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat('en-US-u-ca-iso8601-nu-latn', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(epoch)
+  const values = Object.fromEntries(parts.map(part => [part.type, part.value]))
+  return `${values['year']}-${values['month']}-${values['day']}`
 }

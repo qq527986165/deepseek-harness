@@ -2,7 +2,7 @@
 
 [English](README.md) | 中文
 
-记忆能力 seam 之上的面向模型工具：`memory_write`、`memory_read`、`memory_search` 与 `memory_traverse`。调用方会话的 cwd 解析作用域链（项目 vault 在前、全局在后）；提供方拥有全部存储细节。记忆工具调用与结果都是普通会话日志事件，因此记忆内容可从日志重建。
+记忆能力 seam 之上的面向模型工具：`memory_write`、`memory_read`、`memory_search`、`memory_traverse` 与 `memory_delete`。调用方会话的 cwd 解析作用域链（项目 vault 在前、全局在后）；提供方拥有全部存储细节。记忆工具调用与结果都是普通会话日志事件，因此记忆内容可从日志重建。删除总是先经审批 seam 询问，因此静默的模型删除绝不绕过用户。
 
 ## Composition
 
@@ -13,9 +13,10 @@
   config: { dir: !!js require('node:path').join(process.env.DSH_HOME ?? '~/.dsh', 'memory') }
 - name: '@deepseek-ai/dsh-memory-local'
 - name: '@deepseek-ai/dsh-tool-memory'
+- name: '@deepseek-ai/dsh-user-approval'
 ```
 
-只挂工具不挂服务时，条目保持等待；之后工具调用在无提供方注册时以 `NO_PROVIDER` 显式失败。
+只挂工具不挂服务时，条目保持等待；之后工具调用在无提供方注册时以 `NO_PROVIDER` 显式失败。`memory_delete` 在没有组合审批服务时以清晰错误拒绝；有审批服务时，会话的审批策略适用——`ask` 弹确认卡片，`never` 自动拒绝。
 
 ## Tools
 
@@ -25,6 +26,7 @@
 | `memory_read` | 按 id 或精确标题读一篇笔记，含两个方向的链接 |
 | `memory_search` | 作用域链上的排序全文命中，项目排前 |
 | `memory_traverse` | 沿 `wikilink`/`related` 链接走一到两跳，双向，带悬空标记 |
+| `memory_delete` | 经用户确认后按 id 或精确标题软删一篇笔记；文件移入同级回收文件夹 |
 
 ## Model Experience
 
@@ -32,11 +34,11 @@
 
 #### What the model sees
 
-插件挂载期间，每次请求携带上述描述对应的四个工具 schema；生成的 schema 见[工具目录](../../../docs/tool-catalog.md#deepseek-aidsh-tool-memory)。`memory_write` 参数：`id?`、`scope?`、`title`、`content`、`tags?`、`related?`。`memory_search` 参数：`query`、`limit?`。
+插件挂载期间，每次请求携带上述描述对应的五个工具 schema；生成的 schema 见[工具目录](../../../docs/tool-catalog.md#deepseek-aidsh-tool-memory)。`memory_write` 参数：`id?`、`scope?`、`title`、`content`、`tags?`、`related?`。`memory_search` 参数：`query`、`limit?`。`memory_delete` 参数：`ref`、`scope?`。
 
 #### Token effect
 
-可见期间四个固定 schema 随每次请求发送；本包 opt-in，默认不挂载。
+可见期间五个固定 schema 随每次请求发送；本包 opt-in，默认不挂载。
 
 #### KV Cache effect
 
@@ -46,7 +48,7 @@
 
 #### What the model sees
 
-写入结果说明笔记名、作用域与 vault 路径。读取结果渲染笔记正文加 `Related`/`Backlinks`/`Tags` 行。搜索结果渲染排序的 `title (scope): snippet` 行，或一条显式的空结果消息。遍历结果逐边渲染并带悬空标记与截断提示。
+写入结果说明笔记名、作用域与 vault 路径。读取结果渲染笔记正文加 `Related`/`Backlinks`/`Tags` 行。搜索结果渲染排序的 `title (scope): snippet` 行，或一条显式的空结果消息。遍历结果逐边渲染并带悬空标记与截断提示。删除结果说明被删笔记名、作用域与其移入的回收路径。
 
 #### Token effect
 
@@ -58,6 +60,6 @@
 
 ## Known Limitations and Deferred Work
 
-- **没有 `memory_delete` 工具** —— 删除是 Phase 3 的生命周期决策（审核、TTL、链接修复）；用户仍可直接编辑或删除 vault 文件。
+- **删除需要审批 seam** —— 没有组合审批服务时 `memory_delete` 退化为显式拒绝；询问走会话策略，与其他受保护工具完全一致。
 - **只做显式写入** —— 工具是显式召回接口；自动召回注入、每回合蒸馏与引导 section 位于独立的 `dsh-memory-lifecycle` 消费方。
 - **精确标题查找** —— `memory_read`/`memory_traverse` 按 id 或精确标题解析；模糊标题匹配延期到 Phase 4 检索提供方。

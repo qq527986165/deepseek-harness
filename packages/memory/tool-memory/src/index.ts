@@ -1,16 +1,22 @@
 /**
  * Model-facing memory tools over the memory capability seam: write, read,
- * search, and traverse. The caller's session cwd resolves the scope chain;
- * the provider owns every storage detail.
+ * search, traverse, and delete. The caller's session cwd resolves the scope
+ * chain; the provider owns every storage detail. Deletion asks through the
+ * approval seam, so a silent model delete never bypasses the user.
  * @module @deepseek-ai/dsh-tool-memory
  */
 
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
+import { assertNever } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { MemoryNoteId } from '@deepseek-ai/dsh-memory'
 import type { MemoryNote, MemoryScope, MemoryTraversal } from '@deepseek-ai/dsh-memory'
+// Type-only: makes `ctx.get('approval')` resolve to the ApprovalService
+// augmentation. The approval seam stays optional at runtime — deletion
+// degrades to a loud deny without it.
+import type {} from '@deepseek-ai/dsh-user-approval'
 
 /** Cordis plugin name used by Loader diagnostics. */
 export const name = 'tool-memory'
@@ -93,6 +99,20 @@ export function renderTraverse(traversal: MemoryTraversal): ContentBlock[] {
   return [{ type: 'text', text: lines.join('\n') }]
 }
 
+/**
+ * Render one deleted note reference for the model.
+ * @param result - the committed deletion.
+ * @returns one text content block.
+ */
+export function renderDelete(result: { scope: MemoryScope; title: string; path: string; trashPath?: string }): ContentBlock[] {
+  return [{
+    type: 'text',
+    text: result.trashPath === undefined
+      ? `Deleted memory note "${result.title}" (${result.scope} scope) from ${result.path}.`
+      : `Deleted memory note "${result.title}" (${result.scope} scope); moved to ${result.trashPath}.`,
+  }]
+}
+
 /** Mutable canonical value the read tool returns to the registry. */
 interface ReadNoteValue {
   id: string
@@ -101,6 +121,7 @@ interface ReadNoteValue {
   path: string
   tags: string[]
   body: string
+  updated: number
   related: Array<{ title: string; id?: string }>
   backlinks: Array<{ title: string; id?: string }>
 }
@@ -152,6 +173,7 @@ const NOTE_SCHEMA = {
     ...identityFields(),
     tags: { type: 'array' as const, items: { type: 'string' as const }, required: true as const },
     body: requiredString(),
+    updated: { type: 'number' as const, required: true as const },
     related: { type: 'array' as const, items: LINK_TARGET_SCHEMA, required: true as const },
     backlinks: { type: 'array' as const, items: LINK_TARGET_SCHEMA, required: true as const },
   },
@@ -192,6 +214,20 @@ const SEARCH_OUTPUT = {
     const result = value as { hits: readonly { scope: MemoryScope; title: string; snippet: string }[] }
     return renderSearch(result.hits)
   },
+}
+
+const DELETE_OUTPUT = {
+  schema: {
+    type: 'object' as const,
+    additionalProperties: false,
+    properties: {
+      ...identityFields(),
+      trashPath: { type: 'string' as const },
+    },
+  },
+  render: (_args: unknown, value: unknown) => renderDelete(
+    value as { scope: MemoryScope; title: string; path: string; trashPath?: string },
+  ),
 }
 
 const TRAVERSE_OUTPUT = {
@@ -315,5 +351,50 @@ export function apply(ctx: Context): void {
       nodes: Array<{ id?: string; title: string; via: { kind: string; direction: string } }>
       truncated: boolean
     }),
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'memory_delete',
+    description: 'Delete one memory note by id or exact title (soft delete: the file moves to a sibling trash folder). Always asks for user confirmation.',
+    parameters: {
+      ref: { type: 'string', required: true, description: 'Note id or exact title.' },
+      scope: { type: 'string', description: 'Optional vault scope: "project" or "global". Omit to resolve across both, project first.' },
+    },
+    output: DELETE_OUTPUT,
+    execute: async (args, exec) => {
+      const agent = exec.agent
+      if (agent === undefined) throw new Error('memory tools require an agent caller')
+      if (args.scope !== undefined && args.scope !== 'project' && args.scope !== 'global') {
+        throw new Error(`memory_delete: scope must be "project" or "global", got "${args.scope}"`)
+      }
+      const approval = ctx.get('approval')
+      if (approval === undefined) {
+        throw new Error('memory_delete requires approval, but no approval channel is available')
+      }
+      const outcome = await approval.request({
+        agent,
+        toolName: 'memory_delete',
+        callId: exec.callId,
+        reason: `Delete the memory note "${args.ref}"${args.scope === undefined ? '' : ` (${args.scope} scope)`}?`,
+        signal: exec.signal,
+      })
+      switch (outcome) {
+        case 'allowed-once': break
+        case 'rejected':
+          throw new Error('the user rejected memory_delete')
+        case 'cancelled':
+          throw new Error('approval for memory_delete was cancelled')
+        case 'unavailable':
+          throw new Error('memory_delete requires approval, but no approval channel is available')
+        default:
+          return assertNever(outcome, 'ApprovalOutcome')
+      }
+      return ctx.memory.delete(
+        args.ref,
+        args.scope,
+        agent.session.header.cwd,
+        exec.signal,
+      ).then(result => result as unknown as { id: string; scope: string; title: string; path: string; trashPath?: string })
+    },
   }))
 }

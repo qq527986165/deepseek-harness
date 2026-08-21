@@ -6,8 +6,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   findIndexedNote,
   findIndexedNoteById,
+  findNoteIdByLinkTarget,
   findNoteIdByTitle,
   inLinks,
+  inLinksToNote,
   listIndexedPaths,
   makeSnippet,
   openIndexFile,
@@ -175,8 +177,11 @@ describe('links', () => {
     ])
     upsertIndexedNote(db, row('n2', 'notes/b.md', 'Beta'), '', [], [])
     expect(findNoteIdByTitle(db, 'Beta')).toBe('n2')
+    expect(findNoteIdByLinkTarget(db, 'notes/b.md')).toBe('n2')
+    expect(findNoteIdByLinkTarget(db, 'notes/b')).toBe('n2')
     expect(findNoteIdByTitle(db, 'Gamma')).toBeUndefined()
     expect(inLinks(db, 'Beta')).toEqual([{ kind: 'wikilink', fromId: 'n1' }])
+    expect(inLinksToNote(db, { title: 'Beta', path: 'notes/b' })).toEqual([{ kind: 'wikilink', fromId: 'n1' }])
     expect(inLinks(db, 'nobody')).toEqual([])
     db.close()
   })

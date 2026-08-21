@@ -246,6 +246,12 @@
     - id: ui-message-feedback
       name: '@deepseek-ai/dsh-client-ui-message-feedback'
 
+    # Memory panel: the sidebar foot entry, the shell.overlay drawer, and the
+    # memory-lifecycle settings card. Presence-gated on the memory Remote, so
+    # deployments without the memory family render no trace of it.
+    - id: ui-memory
+      name: '@deepseek-ai/dsh-client-ui-memory'
+
     # Model selection: the /model popupSelect + composer seat over session.models.
     - id: ui-model-selection
       name: '@deepseek-ai/dsh-client-ui-model-selection'

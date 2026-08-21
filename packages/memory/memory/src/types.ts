@@ -41,6 +41,8 @@ export interface MemoryNote {
   readonly path: string
   readonly tags: readonly string[]
   readonly body: string
+  /** Index timestamp in epoch milliseconds of the latest indexed update. */
+  readonly updated: number
   readonly related: readonly MemoryLinkTarget[]
   readonly backlinks: readonly MemoryLinkTarget[]
 }
@@ -149,6 +151,104 @@ export interface MemoryJournalAppendResult {
   readonly date: string
 }
 
+/** One node memory the distillation commit should create in a vault. */
+export interface MemoryDistillCommitNoteInput {
+  readonly title: string
+  readonly content: string
+  readonly tags?: readonly string[]
+  readonly related?: readonly string[]
+}
+
+/** One scope-local group in a whole-turn distillation commit. */
+export interface MemoryDistillCommitGroupInput {
+  readonly scope: MemoryScope
+  readonly date: string
+  readonly journalTitle: string
+  readonly journalBody: string
+  readonly notes: readonly MemoryDistillCommitNoteInput[]
+}
+
+/** One node created by a verified distillation commit. */
+export interface MemoryDistillCommittedNote {
+  readonly id: MemoryNoteId
+  readonly scope: MemoryScope
+  readonly title: string
+  readonly path: string
+  readonly created: string
+  readonly updated: string
+  readonly journalAnchor: string
+  readonly previous?: {
+    readonly id: MemoryNoteId
+    readonly title: string
+    readonly path: string
+  }
+}
+
+/** One scope-local journal entry created by a verified distillation commit. */
+export interface MemoryDistillCommittedJournal {
+  readonly scope: MemoryScope
+  readonly path: string
+  readonly date: string
+  readonly title: string
+  readonly anchor: string
+}
+
+/** Verified result of a whole-turn distillation commit. */
+export interface MemoryDistillCommitResult {
+  readonly notes: readonly MemoryDistillCommittedNote[]
+  readonly journals: readonly MemoryDistillCommittedJournal[]
+}
+
+/** Listing options; every bound is enforced provider-side, never raised by a caller. */
+export interface MemoryListOptions {
+  readonly limit?: number
+}
+
+/** One vault's complete listing: its directory, scope, and listable rows. */
+export interface MemoryListResult {
+  /** Absolute vault directory the rows came from. */
+  readonly dir: string
+  readonly scope: MemoryScope
+  readonly notes: readonly MemoryListedNote[]
+}
+
+/** One listed note row of one vault: the persona file or a topic note. */
+export interface MemoryListedNote {
+  readonly id: MemoryNoteId
+  /** Note path relative to its vault root: `MEMORY.md` or a `notes/` path. */
+  readonly path: string
+  readonly title: string
+  readonly tags: readonly string[]
+  /** Index timestamp in epoch milliseconds of the latest indexed update. */
+  readonly updated: number
+  /** First non-empty body line, for catalogs and list previews. */
+  readonly excerpt: string
+  /** True exactly for the vault's `MEMORY.md` persona row. */
+  readonly persona: boolean
+}
+
+/** Deletion mode: `trash` moves the file to the sibling trash folder, `permanent` removes it outright. */
+export interface MemoryDeleteOptions {
+  readonly mode?: 'trash' | 'permanent'
+}
+
+/** Result of one committed deletion. */
+export interface MemoryDeleteResult {
+  readonly id: MemoryNoteId
+  readonly scope: MemoryScope
+  readonly title: string
+  /** Note path relative to its vault root, as indexed before deletion. */
+  readonly path: string
+  /** Absolute path of the moved file; absent when the file was already gone or the deletion was permanent. */
+  readonly trashPath?: string
+}
+
+/** Read-only service facts for settings surfaces. */
+export interface MemoryInfo {
+  /** The configured global vault directory. */
+  readonly globalDir: string
+}
+
 /**
  * Storage-and-index provider bound through {@link MemoryService.register}.
  * Vault directories are explicit arguments: the service owns scope resolution,
@@ -170,4 +270,32 @@ export interface MemoryProvider {
   recentNotes(opts: MemoryRecentOptions | undefined, dir: string, signal?: AbortSignal): Promise<MemoryRecentNote[]>
   /** Append one entry to a day's journal file on the vault's exclusive chain. */
   appendJournal(input: MemoryJournalAppendInput, dir: string, signal?: AbortSignal): Promise<{ path: string; date: string }>
+  /** Atomically create distillation nodes plus scope-local journal entries across all participating vaults. */
+  commitDistill(
+    groups: readonly MemoryDistillCommitGroupInput[],
+    dirs: Readonly<Record<MemoryScope, string | undefined>>,
+    signal?: AbortSignal,
+  ): Promise<MemoryDistillCommitResult>
+  /** One vault's listable rows: the persona file plus `notes/` notes, journal excluded, `updated` descending. */
+  listNotes(opts: MemoryListOptions | undefined, dir: string, signal?: AbortSignal): Promise<MemoryListedNote[]>
+  /** Delete one note by id or exact title inside the target vault directory, with link repair. */
+  delete(
+    ref: string,
+    dir: string,
+    signal?: AbortSignal,
+    opts?: MemoryDeleteOptions,
+  ): Promise<{ id: MemoryNoteId; title: string; path: string; trashPath?: string }>
+}
+
+declare module '@deepseek-ai/cordis' {
+  interface Events {
+    /**
+     * The registered provider finished a watcher-driven reconciliation of one
+     * vault directory. Consumers tracking injected context compare the changed
+     * files against what they loaded.
+     * @mode emit
+     * @param payload - vault directory and the changed files relative to it.
+     */
+    'memory/change'(payload: { dir: string; paths: string[] }): void
+  }
 }

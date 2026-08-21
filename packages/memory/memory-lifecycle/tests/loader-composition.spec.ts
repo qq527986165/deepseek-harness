@@ -26,11 +26,13 @@ import SessionStore from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
+import { journalDate } from '../src/distill.ts'
 
 let root: string | undefined
 let context: Context | undefined
 
 afterEach(async () => {
+  vi.restoreAllMocks()
   await context?.fiber.dispose()
   context = undefined
   if (root !== undefined) await rm(root, { recursive: true, force: true })
@@ -71,7 +73,7 @@ function textOf(options: GenerateOptions): string {
     .join('\n')
 }
 
-async function boot(): Promise<{ ctx: Context; adapter: ScriptedAdapter; cwd: string; globalVault: string }> {
+async function boot(timeZone: string): Promise<{ ctx: Context; adapter: ScriptedAdapter; cwd: string; globalVault: string }> {
   root = await mkdtemp(join(tmpdir(), 'dsh-memory-lifecycle-loader-'))
   const cwd = join(root, 'work', 'proj')
   const globalVault = join(root, 'home', 'memory')
@@ -101,6 +103,7 @@ async function boot(): Promise<{ ctx: Context; adapter: ScriptedAdapter; cwd: st
     '  config: { watch: false }',
     "- name: '@deepseek-ai/dsh-tool-memory'",
     "- name: '@deepseek-ai/dsh-memory-lifecycle'",
+    `  config: { timeZone: ${JSON.stringify(timeZone)} }`,
     '',
   ].join('\n'))
 
@@ -144,9 +147,37 @@ async function boot(): Promise<{ ctx: Context; adapter: ScriptedAdapter; cwd: st
 }
 
 describe('memory Phase 2 replay-driven acceptance (proposal criterion 10)', () => {
-  it('injects both personas, distills project and global notes with journal links, and reconstructs from the log', async () => {
-    const { ctx, adapter, cwd, globalVault } = await boot()
+  it('replays zero, mixed-scope, predecessor, and configured-calendar commits through the real Loader', async () => {
+    const epoch = Date.parse('2026-08-20T23:30:00.000Z')
+    vi.spyOn(Date, 'now').mockReturnValue(epoch)
+    const utcDate = journalDate(epoch, 'UTC')
+    const timeZone = ['Pacific/Kiritimati', 'Etc/GMT+12'].find(zone => journalDate(epoch, zone) !== utcDate)!
+    const expectedDate = journalDate(epoch, timeZone)
+    const { ctx, adapter, cwd, globalVault } = await boot(timeZone)
     const projectVault = join(cwd, '.dsh', 'memory')
+
+    const runTurn = async (agent: ReturnType<typeof ctx.agentLoop.create>, reply: string, prompt: string): Promise<void> => {
+      const requestCount = adapter.mainRequests.length
+      adapter.distillReplies.push(reply)
+      agent.followup(createUserMessage({
+        content: [{ type: 'text', text: prompt }],
+        source: { kind: 'user' },
+      }))
+      await vi.waitFor(() => { expect(adapter.mainRequests).toHaveLength(requestCount + 1) }, { timeout: 10_000 })
+      await vi.waitFor(() => { expect(adapter.distillReplies).toHaveLength(0) }, { timeout: 10_000 })
+      await agent.whenIdle()
+    }
+
+    const zeroAgent = ctx.agentLoop.create(SessionId('zero'), { provider: PROVIDER, model: PROVIDER }, { cwd })
+    await vi.waitFor(() => { expect(zeroAgent.session.events.some(event => event.type === 'memory/inject')).toBe(true) }, { timeout: 10_000 })
+    await runTurn(
+      zeroAgent,
+      '{"notes":[],"journal":{"title":"No news","body":"- nothing"}}',
+      'Answer this ordinary question without anything durable to remember.',
+    )
+    expect(zeroAgent.session.events.some(event => event.type === 'memory/distill')).toBe(false)
+    await expect(readFile(join(projectVault, 'journal', `${expectedDate}.md`), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(readFile(join(globalVault, 'journal', `${expectedDate}.md`), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
 
     const agent = ctx.agentLoop.create(SessionId('acceptance'), { provider: PROVIDER, model: PROVIDER }, { cwd })
     // (a) session-start injection lands before the first request, carrying both
@@ -164,21 +195,20 @@ describe('memory Phase 2 replay-driven acceptance (proposal criterion 10)', () =
     const refs = injectEvent?.type === 'memory/inject' ? injectEvent.data.notes : []
     expect(refs.some(ref => ref.path.startsWith('journal/'))).toBe(false)
 
-    // Turn 1: project fact, journal entry linking the new note.
-    adapter.distillReplies.push(JSON.stringify({
-      notes: [{ scope: 'project', title: 'Vitest setup', content: 'We use vitest for tests.', tags: ['testing'], related: [] }],
+    // One turn atomically commits project and global groups.
+    const firstRequestIndex = adapter.mainRequests.length
+    await runTurn(agent, JSON.stringify({
+      notes: [
+        { scope: 'project', title: 'Vitest setup', content: 'We use vitest for tests.', tags: ['testing'], related: [] },
+        { scope: 'global', title: 'User prefers green tea', content: 'Prefers green tea over coffee.', tags: [], related: [] },
+      ],
       journal: { title: 'Set up tests', body: '- Configured [[Vitest setup]].' },
-    }))
-    agent.followup(createUserMessage({
-      content: [{ type: 'text', text: 'Please set up vitest for this project.' }],
-      source: { kind: 'user' },
-    }))
-    await agent.whenIdle()
+    }), 'Please set up vitest for this project.')
     await vi.waitFor(() => { expect(agent.session.events.some(event => event.type === 'memory/distill')).toBe(true) }, { timeout: 10_000 })
 
     // (a) the first request saw both personas as injected context.
     expect(adapter.mainRequests.length).toBeGreaterThanOrEqual(1)
-    const firstRequest = textOf(adapter.mainRequests[0]!)
+    const firstRequest = textOf(adapter.mainRequests[firstRequestIndex]!)
     expect(firstRequest).toContain('Memory context')
     expect(firstRequest).toContain('## Persona (project)')
     expect(firstRequest).toContain('Project persona text.')
@@ -186,48 +216,46 @@ describe('memory Phase 2 replay-driven acceptance (proposal criterion 10)', () =
     expect(firstRequest).toContain('Global persona text.')
     expect(firstRequest).not.toContain('SECRET JOURNAL ENTRY')
 
-    // (b) the distillation wrote the project note and appended a journal entry
-    // that links it, in the project vault.
-    const noteFile = await readFile(join(projectVault, 'notes', 'vitest-setup.md'), 'utf8')
-    expect(noteFile).toContain('We use vitest for tests.')
-    const today = new Date().toISOString().slice(0, 10)
-    const journalText = await readFile(join(projectVault, 'journal', `${today}.md`), 'utf8')
-    expect(journalText).toContain('## Set up tests')
-    expect(journalText).toContain('[[Vitest setup]]')
-
-    // (d) the memory/distill event reconstructs the write: its recorded paths
-    // name the exact files the pass committed.
     const distill = agent.session.events.findLast(event => event.type === 'memory/distill')
-    expect(distill?.type === 'memory/distill' && distill.data).toMatchObject({
-      turn: 1,
-      model: { provider: PROVIDER, model: PROVIDER },
-      notes: [{ action: 'create', scope: 'project', title: 'Vitest setup', path: 'notes/vitest-setup.md' }],
-      journal: { scope: 'project', path: `journal/${today}.md`, date: today, title: 'Set up tests' },
-    })
+    expect(distill?.type).toBe('memory/distill')
     const record = distill?.type === 'memory/distill' ? distill.data : undefined
-    expect(record).toBeDefined()
-    const reconstructed = await readFile(join(projectVault, record!.notes[0]!.path), 'utf8')
-    expect(reconstructed).toContain('We use vitest for tests.')
-
-    // (c) turn 2: the classifier routes a personal fact to the global vault.
-    adapter.distillReplies.push(JSON.stringify({
-      notes: [{ scope: 'global', title: 'User prefers green tea', content: 'Prefers green tea over coffee.', tags: [], related: [] }],
-      journal: { title: 'Learned a preference', body: '- Noted [[User prefers green tea]].' },
-    }))
-    agent.followup(createUserMessage({
-      content: [{ type: 'text', text: 'Please remember that I prefer green tea over coffee for every project.' }],
-      source: { kind: 'user' },
-    }))
-    await agent.whenIdle()
-    await vi.waitFor(() => { expect(agent.session.events.filter(event => event.type === 'memory/distill')).toHaveLength(2) }, { timeout: 10_000 })
-    await vi.waitFor(async () => {
-      const globalNote = await readFile(join(globalVault, 'notes', 'user-prefers-green-tea.md'), 'utf8')
-      expect(globalNote).toContain('Prefers green tea over coffee.')
-    }, { timeout: 10_000 })
-
-    const secondDistill = agent.session.events.filter(event => event.type === 'memory/distill').at(-1)
-    expect(secondDistill?.type === 'memory/distill' && secondDistill.data.notes[0]).toMatchObject({
-      scope: 'global', title: 'User prefers green tea', action: 'create',
+    expect(record).toMatchObject({
+      model: { provider: PROVIDER, model: PROVIDER },
+      notes: [
+        { scope: 'project', title: 'Vitest setup' },
+        { scope: 'global', title: 'User prefers green tea' },
+      ],
+      journals: [
+        { scope: 'project', date: expectedDate, path: `journal/${expectedDate}.md` },
+        { scope: 'global', date: expectedDate, path: `journal/${expectedDate}.md` },
+      ],
     })
+    expect(expectedDate).not.toBe(utcDate)
+    const projectRef = record!.notes.find(note => note.scope === 'project')!
+    const globalRef = record!.notes.find(note => note.scope === 'global')!
+    expect(projectRef.path).toMatch(/^notes\/vitest-setup-[a-f0-9]{8}\.md$/)
+    expect(globalRef.path).toMatch(/^notes\/user-prefers-green-tea-[a-f0-9]{8}\.md$/)
+    const noteFile = await readFile(join(projectVault, projectRef.path), 'utf8')
+    expect(noteFile).toContain('We use vitest for tests.')
+    const journalText = await readFile(join(projectVault, 'journal', `${expectedDate}.md`), 'utf8')
+    expect(journalText).toContain('## Set up tests')
+    expect(journalText).toContain(`[[${projectRef.path.slice(0, -3)}|Vitest setup]]`)
+    expect(await readFile(join(globalVault, globalRef.path), 'utf8')).toContain('Prefers green tea over coffee.')
+
+    // A later same-title fact creates a new node and links the untouched predecessor.
+    const original = await readFile(join(projectVault, projectRef.path), 'utf8')
+    await runTurn(agent, JSON.stringify({
+      notes: [{ scope: 'project', title: 'Vitest setup', content: 'Coverage now includes lifecycle commits.', tags: [], related: [] }],
+      journal: { title: 'Extended tests', body: '- Added coverage.' },
+    }), 'Please remember that lifecycle commit coverage was added to vitest.')
+    await vi.waitFor(() => { expect(agent.session.events.filter(event => event.type === 'memory/distill')).toHaveLength(2) }, { timeout: 10_000 })
+    const secondDistill = agent.session.events.filter(event => event.type === 'memory/distill').at(-1)
+    const later = secondDistill?.type === 'memory/distill' ? secondDistill.data.notes[0] : undefined
+    expect(later).toMatchObject({
+      scope: 'project', title: 'Vitest setup', previous: { id: projectRef.id, path: projectRef.path },
+    })
+    expect(later!.path).not.toBe(projectRef.path)
+    expect(await readFile(join(projectVault, projectRef.path), 'utf8')).toBe(original)
+    expect(await readFile(join(projectVault, later!.path), 'utf8')).toContain(`[[${projectRef.path.slice(0, -3)}|Vitest setup]]`)
   }, 60_000)
 })

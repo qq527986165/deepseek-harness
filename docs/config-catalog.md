@@ -1291,7 +1291,7 @@ export interface Config {
 }
 ```
 
-Source: [`packages/memory/memory/src/index.ts:88`](../packages/memory/memory/src/index.ts)
+Source: [`packages/memory/memory/src/index.ts:94`](../packages/memory/memory/src/index.ts)
 
 <a id="deepseek-aidsh-memory-lifecycle"></a>
 
@@ -1300,13 +1300,15 @@ Source: [`packages/memory/memory/src/index.ts:88`](../packages/memory/memory/src
 Requires: `memory` · `llm` · `systemPrompt`
 
 ```ts config-catalog
-/** Deployment-owned cost and noise controls for the automatic memory lifecycle. */
+/** Deployment- and settings-owned cost and noise controls for the automatic memory lifecycle. */
 export interface Config {
   /** Whether finished turns are distilled at all. Defaults to true. */
   distill?: boolean
+  /** Which fixed distillation instruction the auxiliary call uses. Defaults to `concise`. */
+  distillMode?: DistillMode
   /** Minimum non-whitespace characters across a finished turn's text to distill. Defaults to 40. */
   minTurnChars?: number
-  /** Auxiliary distillation output-token cap. Defaults to 1024. */
+  /** Auxiliary distillation output-token cap (circuit breaker, not a user knob). Defaults to 2048. */
   maxDistillTokens?: number
   /** End-to-end auxiliary distillation deadline in milliseconds. Defaults to 30000. */
   distillTimeoutMs?: number
@@ -1314,14 +1316,21 @@ export interface Config {
   provider?: string
   /** Optional explicit auxiliary model; must be paired with `provider`. */
   model?: string
+  /** Journal calendar timezone. Omitted means the Node process timezone. */
+  timeZone?: string
   /** Maximum UTF-8 bytes of the complete session-start injected context. Defaults to 16384. */
   maxInjectBytes?: number
-  /** Project topic notes loaded into the injected context, newest first. Defaults to 10. */
-  recentNoteCount?: number
+  /** Cap on project→global upgrade candidates one `/memory-review` run proposes. Defaults to 5. */
+  maxReviewCandidates?: number
+  /** Age in days after which the panel marks a note with a review badge. Defaults to 30. */
+  reviewAfterDays?: number
 }
+
+/** The distillation instruction families the settings card switches between. */
+export type DistillMode = 'concise' | 'detailed'
 ```
 
-Source: [`packages/memory/memory-lifecycle/src/config.ts:10`](../packages/memory/memory-lifecycle/src/config.ts)
+Source: [`packages/memory/memory-lifecycle/src/config.ts:13`](../packages/memory/memory-lifecycle/src/config.ts)
 
 <a id="deepseek-aidsh-memory-local"></a>
 
@@ -1340,10 +1349,12 @@ export interface Config {
   maxSearchResults?: number
   /** Traversal node cap; defaults to 50. */
   maxTraverseNodes?: number
+  /** Listing row cap; defaults to 200. */
+  maxListNotes?: number
 }
 ```
 
-Source: [`packages/memory/memory-local/src/index.ts:55`](../packages/memory/memory-local/src/index.ts)
+Source: [`packages/memory/memory-local/src/index.ts:62`](../packages/memory/memory-local/src/index.ts)
 
 <a id="deepseek-aidsh-message-feedback"></a>
 
@@ -3110,6 +3121,7 @@ These load from a `cordis.yml` entry with no `config:` block; they declare no co
 - `@deepseek-ai/dsh-client-ui-input-trigger` ([`packages/client/ui-input-trigger/src/index.ts`](../packages/client/ui-input-trigger/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-jobs` ([`packages/client/ui-jobs/src/index.ts`](../packages/client/ui-jobs/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-layout` ([`packages/client/ui-layout/src/index.ts`](../packages/client/ui-layout/src/index.ts))
+- `@deepseek-ai/dsh-client-ui-memory` ([`packages/client/ui-memory/src/index.ts`](../packages/client/ui-memory/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-message-feedback` ([`packages/client/ui-message-feedback/src/index.ts`](../packages/client/ui-message-feedback/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-model-selection` ([`packages/client/ui-model-selection/src/index.ts`](../packages/client/ui-model-selection/src/index.ts))
 - `@deepseek-ai/dsh-client-ui-permission-presets` ([`packages/client/ui-permission-presets/src/index.ts`](../packages/client/ui-permission-presets/src/index.ts))
@@ -3141,6 +3153,7 @@ These load from a `cordis.yml` entry with no `config:` block; they declare no co
 - `@deepseek-ai/dsh-host-plugin-inventory` — requires `loader` ([`packages/host/plugin-inventory/src/index.ts`](../packages/host/plugin-inventory/src/index.ts))
 - `@deepseek-ai/dsh-llm` ([`packages/llm/llm/src/index.ts`](../packages/llm/llm/src/index.ts))
 - `@deepseek-ai/dsh-lsp` ([`packages/lsp/lsp/src/index.ts`](../packages/lsp/lsp/src/index.ts))
+- `@deepseek-ai/dsh-memory-remote` — requires `memory` · `agents` ([`packages/memory/memory-remote/src/index.ts`](../packages/memory/memory-remote/src/index.ts))
 - `@deepseek-ai/dsh-schedule` — requires `agents` · `sessions` · `tools` · `sessionPersistence` ([`packages/schedule/schedule/src/index.ts`](../packages/schedule/schedule/src/index.ts))
 - `@deepseek-ai/dsh-session` ([`packages/core/session/src/index.ts`](../packages/core/session/src/index.ts))
 - `@deepseek-ai/dsh-session-checkpoint-policy` — requires `llm` · `sessionPersistence` · `sessions` · `tools` ([`packages/session/session-checkpoint-policy/src/index.ts`](../packages/session/session-checkpoint-policy/src/index.ts))

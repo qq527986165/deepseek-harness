@@ -170,6 +170,20 @@ export function findIndexedNote(db: DatabaseSync, ref: string): IndexRow | undef
 }
 
 /**
+ * Latest indexed note with one exact title, breaking timestamp ties by insertion order.
+ * @param db - open index database.
+ * @param title - exact note title.
+ * @returns the newest matching row, or `undefined` when none exists.
+ */
+export function findLatestIndexedNoteByTitle(db: DatabaseSync, title: string): IndexRow | undefined {
+  const row = db.prepare(
+    'SELECT id, path, title, created, updated, tags FROM notes WHERE title = ? ORDER BY updated DESC, rowid DESC LIMIT 1',
+  ).get(title) as NoteRow | undefined
+  if (row === undefined) return undefined
+  return { id: row.id, path: row.path, title: row.title, created: row.created, updated: row.updated, tags: parseTags(row.tags) }
+}
+
+/**
  * Every indexed relative path, for collision checks and reconcile scans.
  * @param db - open index database.
  * @returns relative note paths in insertion order.
@@ -271,6 +285,29 @@ export function findNoteIdByTitle(db: DatabaseSync, title: string): string | und
 }
 
 /**
+ * Resolve a wikilink target by note title or exact vault-relative path stem.
+ * @param db - open index database.
+ * @param target - wikilink target without an anchor.
+ * @returns the target note id, or `undefined` when the link dangles.
+ */
+export function findNoteIdByLinkTarget(db: DatabaseSync, target: string): string | undefined {
+  const path = target.endsWith('.md') ? target : `${target}.md`
+  return (db.prepare('SELECT id FROM notes WHERE title = ? OR path = ? LIMIT 1').get(target, path) as { id: string } | undefined)?.id
+}
+
+/**
+ * Incoming links that name either a note title or its exact path stem.
+ * @param db - open index database.
+ * @param row - indexed note title and vault-relative path.
+ * @returns incoming link rows ordered by insertion.
+ */
+export function inLinksToNote(db: DatabaseSync, row: Pick<IndexRow, 'title' | 'path'>): Array<{ kind: string; fromId: string }> {
+  const stem = row.path.endsWith('.md') ? row.path.slice(0, -3) : row.path
+  return db.prepare('SELECT from_id AS fromId, kind FROM links WHERE to_title IN (?, ?) ORDER BY rowid')
+    .all(row.title, stem) as Array<{ kind: string; fromId: string }>
+}
+
+/**
  * Look up one indexed note by exact id.
  * @param db - open index database.
  * @param id - exact note id.
@@ -297,8 +334,12 @@ function findRow(db: DatabaseSync, column: 'id' | 'title', value: string): NoteR
   return db.prepare(`SELECT id, path, title, created, updated, tags FROM notes WHERE ${column} = ?`).get(value) as NoteRow | undefined
 }
 
-/** Parse the stored JSON tags form back into strings. */
-function parseTags(raw: unknown): string[] {
+/**
+ * Parse the stored JSON tags form back into strings.
+ * @param raw - stored tags column value.
+ * @returns the parsed tag strings; a malformed or absent form yields `[]`.
+ */
+export function parseTags(raw: unknown): string[] {
   /* v8 ignore next -- rows are only ever written with a string JSON form. */
   if (typeof raw !== 'string') return []
   try {

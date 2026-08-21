@@ -39,7 +39,7 @@
 | `@deepseek-ai/dsh-tool-subagent-report` | `report` | `ctx.subagents`、`ctx.systemPrompt`、`a live continuable in-process child Agent` | `tool/call`、`tool/result`、`a user-role message in the direct parent session` | - | 按可继续的进程内子级注册，而非全局注册，因此该 schema 仅在这种子级内部可见，并且不受其全局 `toolFilter` 影响。同一份贡献还会安装子级作用域的 `tool:report` 系统提示词 section，本目录不渲染该 section。面向父级的 `send_message` 工具单独安装。 |
 | `@deepseek-ai/dsh-tool-jobs` | `job_kill`、`job_list`、`job_output` | `ctx.tools`、`ctx.jobs`、`ctx.systemPrompt` | `tool/call`、`tool/result`、`user/message via agent.inject() for background completion notices` | - | 与任务种类无关的后台任务控制器：后台 bash 命令、PTY 发送和 subagent 都通过相同的 3 个工具读取、列出和终止。加载该插件会挂接控制器，从而启用生产方的 `ctx.jobs.start()`。 |
 | `@deepseek-ai/dsh-tool-todo` | `todo_write` | `ctx.tools`、`owning Agent session` | `tool/call`、`todo/write`、`tool/result` | - | todo_write 是会话所有的状态；UI 将最新的 todo/write 事件渲染为检查清单。`allowParallelInProgress` 是没有默认值的必填项，因此本目录明确选择 `true`，对应描述允许同时存在多个 `in_progress` 项。选择 `false` 的部署会获得同一工具，但描述会要求只能有 1 个活动任务。 |
-| `@deepseek-ai/dsh-tool-memory` | `memory_read`、`memory_search`、`memory_traverse`、`memory_write` | `ctx.tools`、`ctx.memory`、`a calling Agent (exec.agent supplies the session cwd)` | `tool/call`、`tool/result` | - | - |
+| `@deepseek-ai/dsh-tool-memory` | `memory_delete`、`memory_read`、`memory_search`、`memory_traverse`、`memory_write` | `ctx.tools`、`ctx.memory`、`a calling Agent (exec.agent supplies the session cwd)` | `tool/call`、`tool/result` | - | - |
 | `@deepseek-ai/dsh-tool-workflow` | `workflow` | `ctx.tools`、`ctx.workflowEngine`、`ctx.systemPrompt`、`a calling Agent (exec.agent parents the script children)` | `tool/call`、`tool/result` | - | - |
 | `@deepseek-ai/dsh-tool-web` | `web_fetch`、`web_search` | `ctx.tools`、`ctx.web`、`ctx.systemPrompt` | `tool/call`、`tool/result` | - | web_search 和 web_fetch 将提供方选择置于 ctx.web 之后，使模型可见 schema 在更换后端时保持稳定。 |
 
@@ -1737,6 +1737,31 @@ todo_write 是会话所有的状态；UI 将最新的 todo/write 事件渲染为
 <a id="deepseek-aidsh-tool-memory"></a>
 
 ## `@deepseek-ai/dsh-tool-memory`
+
+### `memory_delete`
+
+按 id 或精确标题删除一篇记忆笔记（软删除：文件会移到同级的回收文件夹）。始终要求用户确认。
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "ref": {
+      "type": "string",
+      "description": "Note id or exact title."
+    },
+    "scope": {
+      "type": "string",
+      "description": "Optional vault scope: \"project\" or \"global\". Omit to resolve across both, project first."
+    }
+  },
+  "required": [
+    "ref"
+  ]
+}
+```
+
+Source: [`packages/memory/tool-memory/src/index.ts`](../packages/memory/tool-memory/src/index.ts)
 
 ### `memory_read`
 
